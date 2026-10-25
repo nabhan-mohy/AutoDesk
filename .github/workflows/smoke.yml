@@ -1,0 +1,50 @@
+name: App smoke test
+
+# Issue #4: automated verification beyond unit tests. Runs the real Streamlit
+# app on Linux (printer checks degrade gracefully there) and verifies that a
+# full health check executes and CSV/JSON/HTML reports are generated.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"   # weekly Monday sanity run
+  workflow_dispatch:
+
+jobs:
+  streamlit-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Full health check + report generation (headless, mocked-free)
+        run: |
+          python - <<'PY'
+          from src.health_engine import run_full_check
+          from src.reporting import generate_reports
+          rep = run_full_check()
+          assert rep["results"], "no results produced"
+          assert rep["summary"]["overall"] in ("READY", "READY WITH ISSUES", "NOT READY")
+          paths = generate_reports(rep)
+          for kind, p in paths.items():
+              import os
+              assert os.path.exists(p) and os.path.getsize(p) > 0, f"{kind} report missing"
+              print(f"{kind}: {p} ({os.path.getsize(p)} bytes)")
+          print("SMOKE OK:", rep["summary"])
+          PY
+      - name: Launch Streamlit and verify HTTP 200
+        run: |
+          nohup python -m streamlit run app.py --server.headless true \
+              --server.port 8501 > streamlit.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8501/healthz > /dev/null; then echo "Streamlit up"; break; fi
+            sleep 2
+          done
+          curl -sf http://localhost:8501/ -o page.html
+          grep -qi "streamlit" page.html
+          echo "--- streamlit.log ---"; tail -n 20 streamlit.log

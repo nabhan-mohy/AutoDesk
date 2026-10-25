@@ -75,10 +75,14 @@ def render_summary(report: dict):
         col.metric(f"{emoji} {status}", n, delta_color="off")
 
 
-def render_results(df: pd.DataFrame):
-    search = st.text_input("Search results", placeholder="Filter by check name, value or recommendation…")
-    fcat = st.multiselect("Category", sorted(df["Category"].unique()), default=sorted(df["Category"].unique()))
-    fst = st.multiselect("Status", [PASS, WARNING, FAIL, INFO], default=[PASS, WARNING, FAIL, INFO])
+def render_results(df: pd.DataFrame, key_prefix: str = "all"):
+    # key_prefix keeps widget IDs unique when this is rendered inside several tabs.
+    search = st.text_input("Search results", placeholder="Filter by check name, value or recommendation…",
+                           key=f"search_{key_prefix}")
+    fcat = st.multiselect("Category", sorted(df["Category"].unique()), default=sorted(df["Category"].unique()),
+                          key=f"cat_{key_prefix}")
+    fst = st.multiselect("Status", [PASS, WARNING, FAIL, INFO], default=[PASS, WARNING, FAIL, INFO],
+                         key=f"stat_{key_prefix}")
     view = df[df["Category"].isin(fcat) & df["Status"].isin(fst)]
     if search:
         mask = view.apply(lambda row: row.astype(str).str.contains(search, case=False).any(), axis=1)
@@ -190,15 +194,15 @@ def main():
     df = st.session_state.df
     with tab_sys:
         render_resource_cards(report)
-        render_results(df[df["Category"] == "System"])
+        render_results(df[df["Category"] == "System"], key_prefix="sys")
     with tab_net:
-        render_results(df[df["Category"] == "Network"])
+        render_results(df[df["Category"] == "Network"], key_prefix="net")
     with tab_prn:
         st.caption("Note: OS-reported status and network reachability do NOT prove a device can "
                    "physically print (toner/paper/jams are not visible from software).")
-        render_results(df[df["Category"] == "Printer"])
+        render_results(df[df["Category"] == "Printer"], key_prefix="prn")
     with tab_all:
-        render_results(df)
+        render_results(df, key_prefix="all")
         render_actions(report)
     with tab_dl:
         render_downloads(report)
