@@ -30,6 +30,13 @@ from .check_model import (
 )
 from .network_checks import tcp_probe, ping_host
 
+CATEGORY = "Printer"
+
+# Win32_Printer PrinterStatus codes (MS documentation)
+STATUS_MAP = {
+    1: "Other", 2: "Unknown", 3: "Idle", 4: "Printing", 5: "Warmup",
+    6: "Stopped Printing", 7: "Offline", 8: "Not Available",
+}
 
 # Per-key defaults mirror config_loader.DEFAULT_CONFIG["timeouts"].
 # Bounds (0.001 .. 120 s) mirror the range validation in
@@ -43,7 +50,6 @@ _TIMEOUT_DEFAULTS: dict[str, float] = {
     "http_check_seconds": 6.0,
 }
 
-
 def cfg_timeout(cfg: dict, key: str) -> float:
     """Return a validated timeout from ``cfg['timeouts'][key]``.
 
@@ -55,6 +61,15 @@ def cfg_timeout(cfg: dict, key: str) -> float:
     default = _TIMEOUT_DEFAULTS.get(key, 3.0)
     raw = (cfg.get("timeouts", {}) or {}).get(key, default)
     return safe_float(raw, default, 0.001, 120.0)
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _run(cmd: list[str], timeout: float) -> tuple[int, str, str]:
+    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return res.returncode, res.stdout or "", res.stderr or ""
 
 
 _PS_GET_PRINTERS = r'''
