@@ -23,6 +23,7 @@ from .check_model import (
     classify_percent,
     error_result,
     make_result,
+    safe_float,
 )
 
 CATEGORY = "System"
@@ -49,6 +50,32 @@ def _fmt_duration(seconds: float) -> str:
         parts.append(f"{m}m")
     parts.append(f"{s}s")
     return " ".join(parts)
+
+
+def _thresholds(cfg: dict) -> dict:
+    """Return resource thresholds with explicit bounds enforced (issue #2).
+
+    Validation in config_loader already flags out-of-range values; this is the
+    second line of defence so classification always uses sane numbers even if a
+    hand-edited config slips through. Defaults mirror DEFAULT_CONFIG.
+    """
+    th = cfg.get("thresholds", {}) or {}
+    d = {
+        "cpu_warning_percent": safe_float(th.get("cpu_warning_percent"), 75.0, 1.0, 99.0),
+        "cpu_fail_percent": safe_float(th.get("cpu_fail_percent"), 95.0, 1.0, 100.0),
+        "memory_warning_percent": safe_float(th.get("memory_warning_percent"), 80.0, 1.0, 99.0),
+        "memory_fail_percent": safe_float(th.get("memory_fail_percent"), 95.0, 1.0, 100.0),
+        "disk_warning_percent": safe_float(th.get("disk_warning_percent"), 85.0, 1.0, 99.0),
+        "disk_fail_percent": safe_float(th.get("disk_fail_percent"), 95.0, 1.0, 100.0),
+        "disk_min_free_gb_warning": safe_float(th.get("disk_min_free_gb_warning"), 10.0, 0.0, 1_000_000.0),
+        "uptime_minimum_hours": safe_float(th.get("uptime_minimum_hours"), 0.0, 0.0, 87_600.0),
+    }
+    # warning must never exceed fail after clamping
+    for pre in ("cpu", "memory", "disk"):
+        w, k = f"{pre}_warning_percent", f"{pre}_fail_percent"
+        if d[w] > d[k]:
+            d[w] = d[k]
+    return d
 
 
 # --------------------------------------------------------------------------- #
@@ -83,7 +110,7 @@ def check_identity() -> list[CheckResult]:
 
 def check_cpu(cfg: dict) -> list[CheckResult]:
     try:
-        th = cfg["thresholds"]
+        th = _thresholds(cfg)
         pct = psutil.cpu_percent(interval=1)
         cores = psutil.cpu_count(logical=True)
         status = classify_percent(pct, th["cpu_warning_percent"], th["cpu_fail_percent"])
@@ -111,7 +138,7 @@ def check_cpu(cfg: dict) -> list[CheckResult]:
 
 def check_memory(cfg: dict) -> list[CheckResult]:
     try:
-        th = cfg["thresholds"]
+        th = _thresholds(cfg)
         vm = psutil.virtual_memory()
         status = classify_percent(vm.percent, th["memory_warning_percent"], th["memory_fail_percent"])
         rec = ""
@@ -140,7 +167,7 @@ def check_memory(cfg: dict) -> list[CheckResult]:
 def check_disks(cfg: dict) -> list[CheckResult]:
     results: list[CheckResult] = []
     try:
-        th = cfg["thresholds"]
+        th = _thresholds(cfg)
         partitions = psutil.disk_partitions(all=False)
         if not partitions:
             return [make_result(
@@ -196,7 +223,7 @@ def check_uptime(cfg: dict) -> list[CheckResult]:
     try:
         boot = psutil.boot_time()
         uptime_s = time.time() - boot
-        min_hours = float(cfg["thresholds"].get("uptime_minimum_hours", 0))
+        min_hours = _thresholds(cfg)["uptime_minimum_hours"]
         status = PASS
         rec = ""
         if min_hours and uptime_s / 3600 < min_hours:

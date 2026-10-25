@@ -36,19 +36,43 @@ class CheckResult:
 
 def classify_percent(value: float, warning_at: float, fail_at: float,
                      higher_is_worse: bool = True) -> str:
-    """Classify a percentage-style metric against warning/fail thresholds."""
+    """Classify a percentage-style metric against warning/fail thresholds.
+
+    Threshold inputs are clamped defensively (issue #2): if config validation
+    ever let an out-of-range value through, classification still behaves
+    sanely instead of producing nonsense statuses.
+    """
+    try:
+        w = min(max(float(warning_at), 0.0), 100.0)
+        f = min(max(float(fail_at), 0.0), 100.0)
+    except (TypeError, ValueError):
+        w, f = 80.0, 95.0  # last-resort safe defaults
     if higher_is_worse:
-        if value >= fail_at:
+        if value >= f:
             return FAIL
-        if value >= warning_at:
+        if value >= w:
             return WARNING
         return PASS
     # lower is worse (e.g. free space percent)
-    if value <= (100 - fail_at):
+    if value <= (100 - f):
         return FAIL
-    if value <= (100 - warning_at):
+    if value <= (100 - w):
         return WARNING
     return PASS
+
+
+def safe_float(value: Any, default: float, lo: float | None = None,
+               hi: float | None = None) -> float:
+    """Parse *value* to float; on any failure use *default*; clamp to [lo, hi]."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        v = float(default)
+    if lo is not None:
+        v = max(v, lo)
+    if hi is not None:
+        v = min(v, hi)
+    return v
 
 
 def make_result(name: str, category: str, status: str, observed: Any = "",

@@ -105,3 +105,48 @@ def test_bad_raw_port_does_not_crash():
          patch.object(pc, "ping_host", return_value=(False, None, "x")):
         res = pc.check_network_printers(cfg)
     assert _find(res, "Network printer: Weird").status == WARNING
+
+
+def test_spooler_running_is_pass_not_a_print_claim():
+    """Spooler PASS is service state only; result must not claim printing works."""
+    import json
+    payload = json.dumps({"Name": "Spooler", "Status": "Running", "StartType": "Automatic"})
+    with patch.object(pc, "_is_windows", return_value=True), \
+         patch.object(pc, "_run", return_value=(0, payload, "")):
+        res = pc.check_spooler_service(CFG)
+    assert res[0].status == PASS
+
+
+def test_spooler_stopped_is_fail_with_manual_only_remediation():
+    """Stopped spooler is a confirmed service failure, but the recommendation
+    must never auto-restart anything."""
+    import json
+    payload = json.dumps({"Name": "Spooler", "Status": "Stopped", "StartType": "Automatic"})
+    with patch.object(pc, "_is_windows", return_value=True), \
+         patch.object(pc, "_run", side_effect=[(0, payload, ""), (0, "", "")]):
+        res = pc.check_spooler_service(CFG)
+    r = res[0]
+    assert r.status == FAIL
+    rec = r.recommendation.lower()
+    assert "does not restart" in rec or "technician" in rec
+
+
+def test_evidence_layers_are_distinct_results():
+    """Device status, queue state and network reachability are separate rows:
+    an offline device flag (WARNING) does not change the probe verdict."""
+    printers = [{"Name": "MFP", "Default": True, "PrinterStatus": 7,
+                 "WorkOffline": True, "PortName": "10.20.30.40", "ServerName": ""}]
+    queues = [{"Name": "MFP", "JobCount": 3}]
+    with patch.object(pc, "_is_windows", return_value=True), \
+         patch.object(pc, "_query_printers", return_value=(printers, "mock")), \
+         patch.object(pc, "_query_queues", return_value=queues):
+        dev = pc.check_installed_printers(CFG)
+    device_row = _find(dev, "Printer status: MFP")
+    queue_row = _find(dev, "Queue: MFP")
+    assert device_row.status == WARNING          # device-reported: uncertain
+    assert queue_row.status == INFO              # queued jobs: informational
+    # Network layer evaluated independently: probes succeed -> PASS regardless
+    with patch.object(pc, "tcp_probe", return_value=(True, "open", 2.0)), \
+         patch.object(pc, "ping_host", return_value=(True, 1.0, "ok")):
+        net = pc.check_network_printers(CFG)
+    assert _find(net, "Network printer: Showroom").status == PASS

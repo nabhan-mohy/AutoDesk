@@ -26,6 +26,7 @@ from .check_model import (
     WARNING,
     error_result,
     make_result,
+    safe_float,
 )
 from .network_checks import tcp_probe, ping_host
 
@@ -128,7 +129,9 @@ def _query_printers(timeout: float) -> tuple[list[dict], str]:
 
 def check_installed_printers(cfg: dict) -> list[CheckResult]:
     results: list[CheckResult] = []
-    max_jobs = int(cfg["printers"].get("max_jobs_listed_per_queue", 20))
+    # Bound the job-listing threshold defensively (issue #2): invalid values
+    # fall back to the default and are clamped to a sane range.
+    max_jobs = int(safe_float(cfg["printers"].get("max_jobs_listed_per_queue", 20), 20, 1, 10000))
     try:
         printers, method = _query_printers(cfg["timeouts"]["subprocess_seconds"])
     except OSError as exc:
@@ -333,7 +336,8 @@ def check_network_printers(cfg: dict, prior_results: list[CheckResult] | None = 
         host = str(prn["host"]).strip()
         name = str(prn.get("name") or host)
         try:
-            port = int(prn.get("raw_port", 9100))
+            # Defensive parse (issue #2): invalid ports fall back to 9100.
+            port = int(safe_float(prn.get("raw_port", 9100), 9100, 1, 65535))
         except (TypeError, ValueError):
             port = 9100
         ok_tcp, tcp_info, _lat = tcp_probe(host, port, tcp_to)

@@ -376,14 +376,22 @@ def check_internet(cfg: dict, prior_results: list[CheckResult] | None = None
                    ) -> list[CheckResult]:
     """Internet connectivity via multiple configurable endpoints.
 
-    Classification rules (avoid false outages):
-    - An individual endpoint failure is FAIL only when EVERY other probe also
-      failed AND no other outbound TCP evidence succeeded earlier in this run.
-    - If at least one endpoint succeeds, the remaining failures are WARNING:
-      a single site can be down, block HEAD requests, or be filtered by the
-      dealership proxy while general internet access works fine.
-    - The summary result carries the authoritative verdict; per-endpoint
-      results are demoted to WARNING once the overall picture is known.
+    Classification rules (issue #1 fix - no false outages from one site):
+    - A *single* endpoint failure NEVER decides overall readiness on its own.
+    - Individual endpoint failures are always WARNING when any other endpoint
+      succeeds OR any other outbound traffic succeeded earlier in this run.
+    - When EVERY endpoint fails, the authoritative verdict is carried by one
+      summary result:
+        * FAIL   - only with corroborated evidence of a real outage: zero HTTP
+                   successes AND no successful gateway/ping/TCP-outbound check
+                   anywhere in this run (and, when available, a gateway that
+                   itself was classified FAIL).
+        * WARNING - everything else (other outbound traffic works, discovery
+                   was inconclusive, or ICMP/HTTP egress may simply be blocked
+                   by the dealership proxy/firewall).
+    - No individual endpoint row is ever marked FAIL; the summary row owns the
+      outage verdict. This guarantees one down website, a HEAD-request block,
+      or a proxy filter cannot by itself push the workstation to NOT READY.
     """
     results: list[CheckResult] = []
     timeout = cfg["timeouts"]["http_check_seconds"]
@@ -396,13 +404,20 @@ def check_internet(cfg: dict, prior_results: list[CheckResult] | None = None
 
     successes = sum(1 for _, ok, _ in outcomes if ok)
     total = len(outcomes)
-    # Corroboration from earlier checks in this run: successful outbound TCP
-    # (gateway / business service / ping host) proves routing works even if
-    # every HTTP endpoint happens to fail (e.g. captive portal, TLS filtering).
+
+    # ---- corroboration sources from earlier checks in this same run -------- #
+    prior = prior_results or []
+    # Successful outbound traffic elsewhere (gateway reply, ping host, or any
+    # TCP probe) proves routing works even if every HTTP endpoint fails.
     other_tcp_ok = any(
         r.status == PASS and ("TCP" in r.name or "Gateway reachability" in r.name
                               or r.name.startswith("Ping:"))
-        for r in (prior_results or []))
+        for r in prior)
+    # A gateway already classified FAIL is positive evidence of a local-path
+    # breakage (authoritative route + failed ICMP + failed TCP probes there),
+    # which strengthens an all-endpoints-failed verdict into a confirmed outage.
+    gateway_fail = any(r.name.startswith("Gateway reachability") and r.status == FAIL
+                       for r in prior)
 
     all_failed = total > 0 and successes == 0
     confirmed_outage = all_failed and not other_tcp_ok
@@ -414,22 +429,31 @@ def check_internet(cfg: dict, prior_results: list[CheckResult] | None = None
                 observed=info, expected=f"HTTP response within {timeout}s",
             ))
         else:
-            # Individual failure: WARNING whenever another endpoint succeeded
-            # (or other outbound traffic works); FAIL only with corroborated
-            # evidence of a genuine outage.
-            st = FAIL if confirmed_outage else WARNING
-            rec = (("No internet access from this workstation: every configured endpoint "
-                    "failed and no other outbound traffic succeeded. Check the local link, "
-                    "gateway and DNS results above.") if confirmed_outage else
-                   (f"'{url}' did not respond, but other endpoints/traffic work, so this is "
-                    "most likely the site being down, blocking HEAD requests, or filtered by "
-                    "the dealership proxy/firewall - not an internet outage."))
+            # Per issue #1: individual endpoint failures are ALWAYS WARNING.
+            # Whether this is a genuine outage is decided by the summary row,
+            # using corroborated evidence across all endpoints and checks.
+            if successes > 0:
+                rec = (f"'{url}' did not respond, but at least one other endpoint succeeded, "
+                       "so internet access works. This endpoint is most likely down, blocking "
+                       "HEAD requests, or filtered by the dealership proxy/firewall.")
+            elif other_tcp_ok:
+                rec = (f"'{url}' did not respond and no endpoint succeeded, but other outbound "
+                       "traffic (gateway/ping/TCP) works - HTTP(S) egress may be filtered. Not "
+                       "proof of an internet outage.")
+            elif confirmed_outage:
+                rec = ("Every configured endpoint failed and no other outbound traffic "
+                       "succeeded anywhere in this run. See the 'Internet connectivity "
+                       "summary' result for the authoritative verdict.")
+            else:
+                rec = (f"'{url}' did not respond. Inconclusive on its own - see the "
+                       "'Internet connectivity summary' result.")
             results.append(make_result(
-                name=f"Internet endpoint: {url}", category=CATEGORY, status=st,
+                name=f"Internet endpoint: {url}", category=CATEGORY, status=WARNING,
                 observed=info, expected=f"HTTP response within {timeout}s",
                 recommendation=rec, details={"error": info},
             ))
 
+    # ---- authoritative summary row ----------------------------------------- #
     if total and successes == 0 and other_tcp_ok:
         # Outbound TCP works but no HTTP endpoint answered: inconclusive.
         results.append(make_result(
@@ -440,13 +464,30 @@ def check_internet(cfg: dict, prior_results: list[CheckResult] | None = None
                             "proxy/firewall, or all test sites happened to be unreachable. Verify "
                             "proxy settings before treating this as an outage."),
         ))
-    elif total and successes == 0:
+    elif total and successes == 0 and gateway_fail:
+        # Every endpoint failed AND the gateway itself was confirmed dead by
+        # independent, corroborated evidence -> sufficient for a real outage.
         results.append(make_result(
             name="Internet connectivity summary", category=CATEGORY, status=FAIL,
-            observed=f"0/{total} external endpoints reachable and no other outbound traffic succeeded",
+            observed=(f"0/{total} external endpoints reachable AND the default gateway was "
+                      "confirmed unreachable by ICMP+TCP probes"),
             expected="At least one endpoint reachable",
-            recommendation=("Confirmed internet outage: every endpoint failed and no corroborating "
-                            "outbound traffic exists. Follow the per-endpoint details above."),
+            recommendation=("Corroborated connectivity failure: no endpoint responded and the "
+                            "gateway check independently failed. Fix the local link/IP "
+                            "configuration first (see gateway/interface rows), then re-run."),
+        ))
+    elif total and successes == 0:
+        # All endpoints failed but there is no corroborated outage evidence
+        # (gateway status unknown/inconclusive): never assert an outage.
+        results.append(make_result(
+            name="Internet connectivity summary", category=CATEGORY, status=WARNING,
+            observed=f"0/{total} external endpoints reachable, but no corroborated outage evidence",
+            expected="At least one endpoint reachable",
+            recommendation=("No configured endpoint answered, however the rest of this run does "
+                            "not confirm a wider failure (gateway probes were inconclusive or "
+                            "blocked). Test in a browser before treating this as an outage; add "
+                            "more reliable endpoints to network.internet_test_urls if this "
+                            "persists."),
         ))
     elif total and successes < total:
         results.append(make_result(

@@ -6,8 +6,10 @@ partially-written file never crashes the application.
 from __future__ import annotations
 
 import copy
+import ipaddress
 import json
 import os
+import re
 from typing import Any
 
 DEFAULT_CONFIG: dict[str, Any] = {
@@ -59,11 +61,47 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _valid_host(value: Any) -> bool:
-    """Accept non-empty hostname or literal IPv4/IPv6 without scheme/spaces."""
+    """Accept non-empty hostname or literal IPv4/IPv6 without scheme/spaces.
+
+    Literal IPs are validated with the ``ipaddress`` module so typos like
+    '10.0.0.999' are rejected explicitly instead of failing later at probe time.
+    """
     host = str(value or "").strip()
     if not host or any(c.isspace() for c in host) or "://" in host:
         return False
-    return True
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    # Not an IP literal - treat as a DNS hostname (RFC-1123 style check).
+    return bool(re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9\-\.]*[A-Za-z0-9])?", host)) \
+        and len(host) <= 253
+
+
+def _printer_port(raw: Any, name: str, problems: list[str]) -> None:
+    """Validate one printer raw-port entry, appending explicit problems."""
+    if raw is None:  # absent -> caller default (9100) applies
+        return
+    if isinstance(raw, bool):
+        problems.append(f"Network printer '{name}' has boolean port {raw!r}; expected 1-65535")
+        return
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        problems.append(f"Network printer '{name}' has non-numeric port '{raw}'")
+        return
+    if not 1 <= port <= 65535:
+        problems.append(f"Network printer '{name}' has invalid port {raw} (must be 1-65535)")
+
+
+def _num_in_range(value: Any, lo: float, hi: float) -> float | None:
+    """Return value as float if it parses and lies within [lo, hi], else None."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return None
+    return v if lo <= v <= hi else None
 
 
 def validate_config(cfg: dict) -> list[str]:
@@ -77,39 +115,55 @@ def validate_config(cfg: dict) -> list[str]:
     problems: list[str] = []
 
     # ------------------------------------------------------------------ #
-    # Resource thresholds: warn must be <= fail, both within [0, 100],
-    # plus explicit bounds on the auxiliary thresholds.
+    # Resource thresholds. Every value must be numeric AND inside its own
+    # explicit [lower, upper] bound; warning must not exceed fail. Anything
+    # out of range is reported explicitly (issue #2) - the check runners
+    # additionally clamp values at use time so an invalid config can never
+    # produce nonsense PASS/FAIL classifications.
     # ------------------------------------------------------------------ #
     th = cfg.get("thresholds", {})
     if not isinstance(th, dict):
         problems.append("'thresholds' section must be an object")
         th = {}
-    percent_pairs = (("cpu", "cpu_warning_percent", "cpu_fail_percent"),
-                     ("memory", "memory_warning_percent", "memory_fail_percent"),
-                     ("disk", "disk_warning_percent", "disk_fail_percent"))
-    for label, wkey, fkey in percent_pairs:
-        try:
-            w = float(th[wkey])
-            f = float(th[fkey])
-        except (KeyError, TypeError, ValueError):
-            problems.append(f"{label}: {wkey}/{fkey} must be numbers")
-            continue
-        if not (0 < w <= 100):
-            problems.append(f"{wkey} must be greater than 0 and at most 100 (got {th[wkey]})")
-        if not (0 < f <= 100):
-            problems.append(f"{fkey} must be greater than 0 and at most 100 (got {th[fkey]})")
-        if w > f:
-            problems.append(f"{wkey} ({w}) is greater than {fkey} ({f})")
 
-    for bkey, lo, hi in (("disk_min_free_gb_warning", 0.0, 1_000_000.0),
-                         ("uptime_minimum_hours", 0.0, 87_600.0)):
-        try:
-            v = float(th[bkey])
-        except (KeyError, TypeError, ValueError):
-            problems.append(f"{bkey} must be a number")
-            continue
-        if not (lo <= v <= hi):
-            problems.append(f"{bkey} must be between {lo:g} and {hi:g} (got {th[bkey]})")
+    def _check_threshold(key: str, lo: float, hi: float) -> float | None:
+        """Validate one threshold against explicit lower/upper bounds."""
+        if key not in th or th[key] is None:
+            problems.append(f"{key} is missing; using default")
+            return None
+        raw = th[key]
+        if isinstance(raw, bool):
+            problems.append(f"{key} must be a number, got boolean {raw!r}")
+            return None
+        v = _num_in_range(raw, lo, hi)
+        if v is None:
+            try:
+                float(raw)  # parses but out of range?
+                problems.append(f"{key} must be between {lo:g} and {hi:g} (got {raw})")
+            except (TypeError, ValueError):
+                problems.append(f"{key} must be a number (got {raw!r})")
+            return None
+        return v
+
+    percent_bounds = (("cpu_warning_percent", 1.0, 99.0),
+                      ("cpu_fail_percent", 1.0, 100.0),
+                      ("memory_warning_percent", 1.0, 99.0),
+                      ("memory_fail_percent", 1.0, 100.0),
+                      ("disk_warning_percent", 1.0, 99.0),
+                      ("disk_fail_percent", 1.0, 100.0))
+    parsed: dict[str, float | None] = {}
+    for key, lo, hi in percent_bounds:
+        parsed[key] = _check_threshold(key, lo, hi)
+
+    for label, wkey, fkey in (("cpu", "cpu_warning_percent", "cpu_fail_percent"),
+                              ("memory", "memory_warning_percent", "memory_fail_percent"),
+                              ("disk", "disk_warning_percent", "disk_fail_percent")):
+        w, f = parsed.get(wkey), parsed.get(fkey)
+        if w is not None and f is not None and w > f:
+            problems.append(f"{wkey} ({w:g}) is greater than {fkey} ({f:g})")
+
+    parsed["disk_min_free_gb_warning"] = _check_threshold("disk_min_free_gb_warning", 0.0, 1_000_000.0)
+    parsed["uptime_minimum_hours"] = _check_threshold("uptime_minimum_hours", 0.0, 87_600.0)
 
     # ------------------------------------------------------------------ #
     # Timeouts: every key must be a positive number <= 120 seconds.
@@ -119,13 +173,12 @@ def validate_config(cfg: dict) -> list[str]:
         problems.append("'timeouts' section must be an object")
         to = {}
     for key, val in to.items():
-        try:
-            v = float(val)
-        except (TypeError, ValueError):
+        if isinstance(val, bool) or not isinstance(val, (int, float, str)):
             problems.append(f"timeout '{key}' must be a number (got {val!r})")
             continue
-        if v <= 0 or v > 120:
-            problems.append(f"timeout '{key}' should be between 0 and 120 seconds (got {val})")
+        v = _num_in_range(val, 0.001, 120.0)
+        if v is None:
+            problems.append(f"timeout '{key}' must be between 0.001 and 120 seconds (got {val!r})")
 
     # ------------------------------------------------------------------ #
     # Network section
@@ -191,18 +244,15 @@ def validate_config(cfg: dict) -> list[str]:
         name = p.get("name", f"entry #{i + 1}")
         host = str(p.get("host", "")).strip()
         enabled = bool(p.get("enabled"))
+        # Validate the address for EVERY entry (even disabled ones) so typos
+        # are surfaced explicitly instead of being silently skipped.
         if not host:
             if enabled:
                 problems.append(f"Network printer '{name}' is enabled but has no host/IP")
         elif not _valid_host(host):
             problems.append(f"Network printer '{name}' has invalid host '{p.get('host')}'")
-        raw = p.get("raw_port", 9100)
-        try:
-            port = int(raw)
-            if not 1 <= port <= 65535:
-                problems.append(f"Network printer '{name}' has invalid port {raw} (must be 1-65535)")
-        except (TypeError, ValueError):
-            problems.append(f"Network printer '{name}' has non-numeric port '{raw}'")
+        # Validate the port whenever it is present, enabled or not.
+        _printer_port(p.get("raw_port"), str(name), problems)
 
     try:
         mj = int(prn.get("max_jobs_listed_per_queue", 20))

@@ -136,14 +136,36 @@ def test_internet_all_fail_but_tcp_works_elsewhere_is_warning():
     assert summary.status == WARNING
 
 
-def test_internet_confirmed_outage_all_fail_no_corroboration_is_fail():
-    """FAIL only when every endpoint fails AND nothing else got outbound."""
+def test_internet_endpoint_rows_never_fail():
+    """Issue #1: individual endpoint rows are always WARNING, never FAIL -
+    a single endpoint must not decide overall readiness on its own."""
     prior = [CheckResult(name="Service TCP: DMS (10.1.1.5:1433)", category="Network", status=FAIL)]
     with patch.object(nc, "_http_probe", return_value=(False, "No response: unreachable")):
         res = nc.check_internet(CFG_NET, prior_results=prior)
-    assert all(_endpoint(res, u).status == FAIL for u in ("https://a.test", "https://b.test"))
+    assert all(_endpoint(res, u).status == WARNING for u in ("https://a.test", "https://b.test"))
+
+
+def test_internet_confirmed_outage_requires_gateway_failure_evidence():
+    """Summary FAIL only when every endpoint fails AND the gateway check was
+    independently confirmed dead (corroborated evidence)."""
+    prior = [
+        CheckResult(name="Service TCP: DMS (10.1.1.5:1433)", category="Network", status=FAIL),
+        CheckResult(name="Gateway reachability 192.168.1.1", category="Network", status=FAIL),
+    ]
+    with patch.object(nc, "_http_probe", return_value=(False, "No response: unreachable")):
+        res = nc.check_internet(CFG_NET, prior_results=prior)
     summary = [r for r in res if r.name == "Internet connectivity summary"][0]
     assert summary.status == FAIL
+
+
+def test_internet_all_fail_without_corroboration_is_warning_not_fail():
+    """All endpoints down but no corroborated outage evidence (gateway status
+    unknown/inconclusive) -> WARNING; never report an outage from probes alone."""
+    prior = [CheckResult(name="Network interfaces", category="Network", status=PASS)]
+    with patch.object(nc, "_http_probe", return_value=(False, "No response: blocked")):
+        res = nc.check_internet(CFG_NET, prior_results=prior)
+    summary = [r for r in res if r.name == "Internet connectivity summary"][0]
+    assert summary.status == WARNING
 
 
 def test_internet_all_success_is_pass_no_summary_issue():
