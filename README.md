@@ -118,7 +118,7 @@ Open the URL printed in the terminal — normally **http://localhost:8501**.
 python -m pytest -q
 ```
 
-Expected output: `49 passed`.
+Expected output: `54 passed` (the authoritative current count — rerun the suite to confirm after any change).
 
 ---
 
@@ -178,6 +178,26 @@ Edit `config.json` in any text editor, save, then click **Reload config** in the
 ```
 
 Set `enabled: true` and fill `host` (IP or hostname) to activate reachability tests (TCP 9100 raw printing port + ICMP). Results are labelled *reachable/unreachable*, never "can print".
+
+### Configuration validation rules and acceptable bounds
+
+`src/config_loader.py::validate_config()` checks every user-tunable surface on load; each problem is shown as an explicit warning in the sidebar (malformed entries are never silently ignored), and out-of-range values are additionally clamped at use time so a bad config cannot produce nonsense PASS/FAIL classifications.
+
+| Setting | Rule / accepted range |
+|---|---|
+| `cpu/memory/disk_warning_percent` | number, **1–99** |
+| `cpu/memory/disk_fail_percent` | number, **1–100** |
+| warning vs fail thresholds | per resource, `warning <= fail` (inverted pairs rejected) |
+| `disk_min_free_gb_warning` | number, **0–1,000,000** GB |
+| `uptime_minimum_hours` | number, **0–87,600** (one year) |
+| `timeouts.*` | every key must be a number, **0.001–120 s**; booleans/strings rejected explicitly |
+| `internet_test_urls[i]` | non-empty, must start with `http://` or `https://` |
+| `dns_test_hostnames[i]` / `ping_hosts[i]` | valid hostname or IPv4 literal |
+| `business_services[i]` | object with valid host (required when enabled) and numeric port **1–65535**; invalid entries reported by name/index |
+| `network_printers[i]` | **every entry validated, enabled or not**: valid host/IP required when enabled, invalid host always flagged, `raw_port` validated whenever present (**1–65535**, defaults to 9100 at probe time); non-object entries reported as malformed |
+| `max_jobs_listed_per_queue` | integer **1–10,000** |
+| Section types | `thresholds`, `network`, `printers` etc. must be objects; lists must be lists |
+| Corrupt `config.json` | falls back to full defaults with a visible error instead of crashing |
 
 ---
 
@@ -240,19 +260,65 @@ Tests mock psutil, sockets, ping/subprocess, WMI, and filesystem-dependent calls
 **Actual result in the development environment (Python 3.12, Linux container):**
 
 ```
-.............................                                            [100%]
-49 passed in 0.25s
+......................................................                   [100%]
+54 passed in 0.23s
 ```
 
 | Suite | Tests | Focus |
 |---|---|---|
 | `test_health_engine.py` | 8 | summarize/verdict, thresholds, crash isolation, progress |
-| `test_network_checks.py` | 12 | gateway PASS/WARNING/FAIL evidence rules + internet endpoint false-outage rules (mocked) |
-| `test_printer_checks.py` | 8 | offline status => WARNING never FAIL, probe-only failure inconclusive, FAIL requires corroborated local outage, non-Windows graceful degradation |
-| `test_config_loader.py` | 16 | defaults merging, threshold bounds (warn<=fail, 0-100), every printer host/port validated even when disabled, malformed entries, timeout bounds, corrupt-file handling |
-| `test_reporting.py` | 4 | CSV rows, JSON schema, HTML content, filename safety |
+| `test_network_checks.py` | 14 | gateway PASS/WARNING/FAIL evidence rules + internet endpoint false-outage rules (mocked) |
+| `test_printer_checks.py` | 11 | offline status => WARNING never FAIL, probe-only failure inconclusive, FAIL requires corroborated local outage, non-Windows graceful degradation |
+| `test_config_loader.py` | 16 | defaults merging, threshold bounds (warn<=fail, explicit min/max per threshold), every printer host/port validated even when disabled, malformed entries, timeout bounds, corrupt-file handling |
+| `test_reporting.py` | 5 | CSV rows, JSON schema, HTML content, filename safety, no credentials in output |
+
+### Smoke test (GitHub Actions)
+
+`.github/workflows/smoke.yml` runs on push/PR to `main`, weekly, and manually
+(`workflow_dispatch`). It executes the **real** end-to-end pipeline headlessly —
+`src.health_engine.run_full_check()` followed by
+`src.reporting.write_reports(report, out_dir="reports/smoke")` (the actual
+exported API; there is no `generate_reports` function) — and **fails the build
+if any of the CSV/JSON/HTML report files is missing or empty**. It additionally
+asserts the CSV header contains `check_name`/`recommendation` and that the JSON
+payload carries hostname/version. A second step launches Streamlit headless and
+requires an HTTP 200 from `http://localhost:8501/` before the job passes.
+Generated reports are uploaded as workflow artifacts (`smoke-reports`) for
+evidence.
+
+The same pipeline was run locally in this environment and passed:
+
+```
+csv : reports/smoke/health_<host>_<timestamp>.csv  (~3.9 KB)
+json: reports/smoke/health_<host>_<timestamp>.json (~8.0 KB)
+html: reports/smoke/health_<host>_<timestamp>.html (~6.6 KB)
+SMOKE OK: {'counts': {...}, 'overall': 'READY WITH ISSUES', 'total': 18}
+```
 
 An end-to-end smoke run of `run_full_check()` was also executed on this environment: the dashboard launched (HTTP 200 on :8501), all categories completed in ~1.3 s, and CSV/JSON/HTML reports were written successfully. Windows-printer code paths (WMI/PowerShell) are exercised only on Windows 11 hosts; elsewhere they return clear "not applicable" INFO results rather than crashing.
+
+### Manual Windows 11 checklist (required before showroom rollout)
+
+GitHub-hosted CI cannot validate live devices. On a representative Windows 11
+workstation, run from PowerShell in the project directory:
+
+```powershell
+python -m pip install -r requirements.txt
+python -m pytest -q          # expect: 54 passed
+python -m streamlit run app.py
+```
+
+Then verify each item:
+
+1. Dashboard loads at http://localhost:8501 with title, version and readiness banner.
+2. **Run Full Health Check** completes with live progress and elapsed time.
+3. System cards show real hostname, user, Windows build, CPU/RAM/disk/uptime.
+4. Network section shows the actual adapter IPv4, discovered gateway, DNS servers, and per-endpoint results (individual endpoint failures appear as WARNING, not FAIL).
+5. Printer section lists installed printers, the default printer, spooler state and queue jobs via PowerShell/CIM (`Get-PrintQueue`, `root\standardcimv2`).
+6. Deliberately break one check (e.g., unplug network cable mid-scan) — the run must finish and explain the failure, not crash.
+7. All three download buttons produce non-empty CSV/JSON/HTML files, and copies land in `reports/`.
+8. Open the HTML report in Edge and confirm it renders.
+9. Re-run after editing `config.json` and click **Reload config**; invalid values must surface as visible warnings.
 
 ---
 
@@ -309,11 +375,53 @@ also verifies that `app.py` parses cleanly.
 
 The tool is deliberately conservative about claiming outages:
 
+### Internet endpoints vs. the overall connectivity verdict
+
+Each configured `internet_test_urls` entry is probed independently, and the two
+levels of result mean different things:
+
+- **Individual endpoint rows are never FAIL.** An endpoint that does not answer
+  is recorded as **WARNING** with a recommendation explaining the likely benign
+  causes (site down, HEAD request blocked, proxy/captive-portal filtering). A
+  single dead website must never make a workstation NOT READY.
+- **The authoritative verdict lives in one summary row** ("Internet
+  connectivity"), computed from corroborated evidence across *all* endpoints
+  plus other outbound checks:
+  - At least one endpoint succeeds → summary PASS; failed endpoints stay WARNING.
+  - All endpoints fail but gateway/TCP probes elsewhere succeeded → summary
+    **WARNING** (HTTP egress filtering or captive portal — not a proven outage).
+  - All endpoints fail **and** no other outbound traffic succeeded **and** the
+    default gateway itself was confirmed dead → summary **FAIL** (confirmed
+    internet outage). This is the only way an internet FAIL can be produced.
+
+### Gateway evidence
+
 | Situation | Status | Why |
 |---|---|---|
 | Gateway ping succeeds (or TCP probe reaches it) | PASS | Direct proof of reachability |
-| Gateway discovered heuristically, probes inconclusive, or ICMP blocked while other traffic works | WARNING | A failed ping alone is never treated as an outage |
+| Gateway discovered heuristically, probes inconclusive, or ICMP blocked while other traffic works | WARNING | A failed ping alone is never treated as an outage; a gateway found via config/route table is not necessarily reachable |
 | Authoritative default route + all gateway probes fail + every other outbound TCP check also fails | FAIL | Corroborated evidence of a real connectivity failure |
+
+### Printer evidence layers
+
+Four separate evidence layers are kept distinct, and no single layer is ever
+used to claim the device cannot physically print:
+
+1. **Device-reported status** (Windows CIM/`Get-PrintQueue` printer status and
+   status messages) — ambiguous and often stale, so capped at **WARNING**;
+   "Offline"/"Not Available"/"Unknown" never produces FAIL on its own.
+2. **Spooler service state** (Windows Print Spooler) — a locally verifiable
+   fact; stopped spooler is a definitive **FAIL**.
+3. **Queue/job state** (queued/error/paused jobs per queue) — reported as
+   INFO/WARNING; job counts prove nothing about hardware health.
+4. **Network reachability** (ICMP + TCP raw port for configured printers) —
+   probes alone are **inconclusive**: a printer answering neither ping nor TCP
+   is most often asleep or filtering probes, so it stays **WARNING** unless the
+   workstation's own interface/gateway checks are simultaneously failing
+   (corroborated wider outage), which is the only case escalated to **FAIL**.
+
+| Situation | Status | Why |
+|---|---|---|
 | One internet endpoint down while another succeeds | WARNING (endpoint) + WARNING (summary) | Single site may be down/block HEAD/proxy-filtered; internet works |
 | All endpoints fail but other outbound TCP succeeded earlier | WARNING | HTTP egress filtering or captive portal, not proven outage |
 | All endpoints fail and nothing else got outbound | FAIL | Confirmed internet outage |
@@ -322,8 +430,6 @@ The tool is deliberately conservative about claiming outages:
 | Network printer unreachable AND workstation interface/gateway checks also failing | FAIL | Part of a wider corroborated outage |
 | Print Spooler service stopped | FAIL | Definitive, locally verifiable service failure |
 
-Four evidence layers are kept distinct in printer diagnostics: **device-reported
-status**, **spooler service state**, **queue/job state**, and **network
-reachability**. No layer alone is used to claim the device cannot physically
-print, and the tool never clears queues, restarts services, or prints test pages.
+No evidence layer alone is used to claim the device cannot physically print, and
+the tool never clears queues, restarts services, or prints test pages.
 
