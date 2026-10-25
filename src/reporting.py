@@ -76,19 +76,21 @@ def to_json(report: dict) -> str:
 
 
 def to_csv(report: dict) -> str:
+    """One row per check with the full evidence trail (verdict, evidence class,
+    duration_ms, timeout_s). Downloaded CSV and write_reports' .csv file are
+    byte-identical via to_csv_bytes()."""
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow(["timestamp", "category", "check", "status", "verdict", "evidence",
-                "duration_ms", "timeout_s", "observed", "expected", "recommendation"])
-    s = report.get("summary", {})
-    w.writerow([report.get("started_local", ""), "SUMMARY", "Overall readiness",
-                s.get("overall", ""), "", "", report.get("duration_seconds", ""), "",
-                f"counts={s.get('counts',{})}", "", ""])
+    w.writerow(["timestamp", "category", "check_name", "status", "verdict", "evidence",
+                "duration_ms", "timeout_s", "observed_value", "expected_condition",
+                "recommendation", "hostname", "app_version"])
+    host = report.get("hostname", "")
+    ver = report.get("version", "")
     for r in report.get("results", []):
         w.writerow([r.timestamp, r.category, r.name, r.status, r.verdict, r.evidence,
                     r.duration_ms if r.duration_ms is not None else "",
                     r.timeout_seconds if r.timeout_seconds is not None else "",
-                    r.observed, r.expected, r.recommendation])
+                    r.observed, r.expected, r.recommendation, host, ver])
     return buf.getvalue()
 
 
@@ -293,3 +295,79 @@ def ticket_summary(report: dict) -> str:
             lines.append(f"{r.status} [{r.evidence}] {r.category}/{r.name}: {r.observed[:150]}")
     lines += ["", f"Report integrity SHA-256: {report.get('report_sha256','')}"]
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Compatibility API used by app.py, tests and the smoke workflow.
+# These wrappers sit on top of the format writers above so that every export
+# path produces byte-identical content whether downloaded from the dashboard
+# or written to disk via write_reports().
+# --------------------------------------------------------------------------- #
+REPORTS_DIR = EXPORT_DIR
+
+#: Formats written by write_reports(); values are (extension, writer callable).
+_DEFAULT_FORMATS = {"csv": "csv", "json": "json", "html": "html"}
+
+
+def _csv_bytes_with_bom(report: dict) -> bytes:
+    """UTF-8 BOM keeps Excel from mangling ₹/₹-region names and emoji icons."""
+    return b"\xef\xbb\xbf" + to_csv(report).encode("utf-8")
+
+
+_BYTES_WRITERS = {
+    "csv": _csv_bytes_with_bom,
+    "json": lambda report: to_json(report).encode("utf-8"),
+    "html": lambda report: to_html(report).encode("utf-8"),
+}
+
+
+def to_csv_bytes(report: dict) -> bytes:
+    """CSV export as bytes (same content as write_reports' .csv file)."""
+    return _BYTES_WRITERS["csv"](report)
+
+
+def to_json_bytes(report: dict) -> bytes:
+    """JSON export as bytes (same content as write_reports' .json file)."""
+    return _BYTES_WRITERS["json"](report)
+
+
+def to_html_bytes(report: dict) -> bytes:
+    """HTML export as bytes (same content as write_reports' .html file)."""
+    return _BYTES_WRITERS["html"](report)
+
+
+def write_reports(report: dict, out_dir: str | None = None,
+                  formats: list[str] | None = None) -> dict:
+    """Write csv/json/html (plus markdown/pdf when requested) under one stem.
+
+    Returns {format: path}. Every non-empty assertion made by CI holds because
+    each writer emits a full document even for an empty result list. Raises
+    OSError only when the output directory genuinely cannot be written.
+    """
+    out_dir = out_dir or REPORTS_DIR
+    os.makedirs(out_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    host = "".join(c if c.isalnum() or c in "-_" else "-"
+                   for c in report.get("hostname", "host")) or "host"
+    chosen = formats or list(_DEFAULT_FORMATS)
+    unknown = [f for f in chosen if f not in _BYTES_WRITERS and f not in ("markdown", "pdf")]
+    if unknown:
+        raise ValueError(f"Unknown report format(s): {unknown}")
+
+    paths: dict[str, str] = {}
+    for fmt in chosen:
+        ext = {"csv": "csv", "json": "json", "html": "html",
+               "markdown": "md", "pdf": "pdf"}[fmt]
+        path = os.path.join(out_dir, f"health_report_{host}_{ts}.{ext}")
+        if fmt == "pdf":
+            data = to_pdf(report)
+            with open(path, "wb") as fh:
+                fh.write(data)
+        elif fmt == "markdown":
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                fh.write(to_markdown(report))
+        else:
+            with open(path, "wb") as fh:
+                fh.write(_BYTES_WRITERS[fmt](report))
+        paths[fmt] = path
+    return paths

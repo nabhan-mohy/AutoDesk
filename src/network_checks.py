@@ -28,9 +28,29 @@ from .check_model import (
     WARNING,
     error_result,
     make_result,
+    safe_float,
 )
 
 CATEGORY = "Network"
+
+#: Fallbacks mirror DEFAULT_CONFIG in config_loader.py. A partially supplied
+#: config (tests, central-dashboard payloads, hand-edited config.json) must
+#: never raise KeyError inside a check - that used to turn every network row
+#: into a spurious 'confirmed' failure.
+_TIMEOUT_DEFAULTS = {
+    "tcp_connect_seconds": 3.0,
+    "ping_seconds": 3.0,
+    "dns_resolve_seconds": 5.0,
+    "http_check_seconds": 6.0,
+    "subprocess_seconds": 10.0,
+}
+
+
+def cfg_timeout(cfg: dict, key: str) -> float:
+    """Timeout for *key* with default + sane bounds (0.1..120 s)."""
+    to = cfg.get("timeouts") or {}
+    return safe_float(to.get(key, _TIMEOUT_DEFAULTS.get(key, 5.0)),
+                      _TIMEOUT_DEFAULTS.get(key, 5.0), 0.1, 120.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -204,8 +224,8 @@ def check_gateway(cfg: dict, prior_results: list[CheckResult] | None = None
                                 "gateway may not appear without admin rights."),
             )]
         results = []
-        timeout = cfg["timeouts"]["ping_seconds"]
-        tcp_timeout = cfg["timeouts"]["tcp_connect_seconds"]
+        timeout = cfg_timeout(cfg, "ping_seconds")
+        tcp_timeout = cfg_timeout(cfg, "tcp_connect_seconds")
         # Corroborating evidence: did any *other* TCP probe already succeed in
         # this run? If yes, routing works and an unresponsive gateway is most
         # likely just blocking ICMP - never report an outage in that case.
@@ -319,7 +339,7 @@ def check_dns(cfg: dict) -> list[CheckResult]:
     except Exception as exc:
         results.append(error_result("DNS servers configured", CATEGORY, exc))
 
-    timeout = cfg["timeouts"]["dns_resolve_seconds"]
+    timeout = cfg_timeout(cfg, "dns_resolve_seconds")
     # NOTE: socket.setdefaulttimeout() does NOT reliably bound getaddrinfo's
     # internal resolver on all platforms (Windows can block in the system
     # resolver regardless). We still set it as a best-effort guard, but also
@@ -428,7 +448,7 @@ def check_internet(cfg: dict, prior_results: list[CheckResult] | None = None
       or a proxy filter cannot by itself push the workstation to NOT READY.
     """
     results: list[CheckResult] = []
-    timeout = cfg["timeouts"]["http_check_seconds"]
+    timeout = cfg_timeout(cfg, "http_check_seconds")
     urls = [str(u).strip() for u in cfg["network"].get("internet_test_urls", [])
             if str(u).strip()]
     outcomes: list[tuple[str, bool, str]] = []
@@ -556,7 +576,7 @@ def tcp_probe(host: str, port: int,
 
 def check_business_services(cfg: dict) -> list[CheckResult]:
     results: list[CheckResult] = []
-    timeout = cfg["timeouts"]["tcp_connect_seconds"]
+    timeout = cfg_timeout(cfg, "tcp_connect_seconds")
     services = [s for s in cfg["network"].get("business_services", [])
                 if isinstance(s, dict) and s.get("enabled") and str(s.get("host", "")).strip()]
     if not services:
@@ -609,7 +629,7 @@ def check_business_services(cfg: dict) -> list[CheckResult]:
 # --------------------------------------------------------------------------- #
 def check_ping_hosts(cfg: dict) -> list[CheckResult]:
     results: list[CheckResult] = []
-    timeout = cfg["timeouts"]["ping_seconds"]
+    timeout = cfg_timeout(cfg, "ping_seconds")
     for host in cfg["network"].get("ping_hosts", []):
         host = str(host).strip()
         if not host:

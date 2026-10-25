@@ -59,6 +59,48 @@ if _WINDOWS_ANALYSIS:
 ALL_CATEGORIES = list(CATEGORY_RUNNERS.keys())
 
 
+def summarize(results: list[CheckResult]) -> dict:
+    """Build the summary block from a list of results.
+
+    Public helper (kept for tests and the central dashboard): counts by status,
+    counts by evidence class, and the overall readiness verdict.
+
+    "Trust every result" rule: only rows backed by CONFIRMED evidence can make
+    a workstation NOT READY. An internal crash row (details['error']) also
+    counts as confirmed — a broken check must never be silently tolerated.
+    FAILs whose evidence is inconclusive/unsupported surface as warnings
+    ("READY WITH ISSUES") so technicians verify manually instead of seeing a
+    false outage claim.
+    """
+    counts = {PASS: 0, WARNING: 0, FAIL: 0, INFO: 0}
+    evidence_counts = {CONFIRMED: 0, WARNING_LEVEL: 0, INCONCLUSIVE: 0,
+                       UNSUPPORTED: 0, OBSERVATION: 0}
+    blocking = 0
+    soft_fail = 0
+    warning_seen = False
+    for r in results:
+        counts[r.status] = counts.get(r.status, 0) + 1
+        evidence_counts[r.evidence] = evidence_counts.get(r.evidence, 0) + 1
+        if r.status == FAIL:
+            if r.evidence == CONFIRMED or r.details.get("error"):
+                blocking += 1
+            else:
+                soft_fail += 1
+        elif r.status == WARNING:
+            warning_seen = True
+
+    if blocking > 0:
+        overall = "NOT READY"
+    elif warning_seen or soft_fail > 0:
+        overall = "READY WITH ISSUES"
+    else:
+        overall = "READY"
+
+    return {"overall": overall, "counts": counts, "total": len(results),
+            "evidence_counts": evidence_counts,
+            "confirmed_failures": blocking, "soft_failures": soft_fail}
+
+
 def _timeout_for(category: str, cfg: dict) -> float | None:
     """The dominant configured timeout bounding checks in this category."""
     to = cfg.get("timeouts", {}) or {}
@@ -73,12 +115,22 @@ def _timeout_for(category: str, cfg: dict) -> float | None:
     return None
 
 
+def _runner_label(runner) -> str:
+    """Best-effort readable name for a runner callable (used in error rows)."""
+    try:
+        return getattr(runner, "__name__", None) or repr(runner)
+    except Exception:
+        return repr(runner)
+
+
 def _run_category(category: str, cfg: dict) -> list[CheckResult]:
     runner = CATEGORY_RUNNERS[category]
     try:
         results = runner(cfg)
     except Exception as exc:  # last-resort guard; runners already self-guard
-        results = [error_result(f"{category} checks", category, exc)]
+        # The row name carries the runner function name so logs/exports show
+        # exactly which check crashed (e.g. 'run_system_checks').
+        results = [error_result(_runner_label(runner), category, exc)]
     tmo = _timeout_for(category, cfg)
     for r in results:
         if r.timeout_seconds is None:
@@ -170,19 +222,8 @@ def run_full_check(cfg: dict | None = None,
         llm_explanation = None
 
     # ---- summary ------------------------------------------------------------ #
-    counts = {PASS: 0, WARNING: 0, FAIL: 0, INFO: 0}
-    evidence_counts = {CONFIRMED: 0, WARNING_LEVEL: 0, INCONCLUSIVE: 0,
-                       UNSUPPORTED: 0, OBSERVATION: 0}
-    for r in all_results:
-        counts[r.status] = counts.get(r.status, 0) + 1
-        evidence_counts[r.evidence] = evidence_counts.get(r.evidence, 0) + 1
-
-    if counts[FAIL] > 0:
-        overall = "NOT READY"
-    elif counts[WARNING] > 0:
-        overall = "READY WITH ISSUES"
-    else:
-        overall = "READY"
+    summary = summarize(all_results)
+    overall = summary["overall"]
 
     duration = round(time.perf_counter() - t_start, 2)
     if progress_cb:
@@ -204,8 +245,7 @@ def run_full_check(cfg: dict | None = None,
         "duration_seconds": duration,
         "category_seconds": timings,
         "results": all_results,
-        "summary": {"overall": overall, "counts": counts, "total": len(all_results),
-                    "evidence_counts": evidence_counts},
+        "summary": summary,
         "findings": findings,
         "llm_explanation": llm_explanation,
         "config_path": cfg.get("_config_path", ""),
