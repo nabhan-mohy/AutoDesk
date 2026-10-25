@@ -5,7 +5,7 @@ name: App smoke test
 # full health check executes and CSV/JSON/HTML reports are generated.
 on:
   push:
-    branches: [main]
+    branches: [main, master]   # matches the repository's default branch name
   pull_request:
   schedule:
     - cron: "0 6 * * 1"   # weekly Monday sanity run
