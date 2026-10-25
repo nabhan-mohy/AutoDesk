@@ -1,0 +1,54 @@
+{
+  "app_name": "AutoDesk IT Health Monitor",
+  "version": "1.0.0",
+  "thresholds": {
+    "cpu_warning_percent": 75.0,
+    "cpu_fail_percent": 95.0,
+    "memory_warning_percent": 80.0,
+    "memory_fail_percent": 95.0,
+    "disk_warning_percent": 85.0,
+    "disk_fail_percent": 95.0,
+    "disk_min_free_gb_warning": 10.0,
+    "uptime_minimum_hours": 0.0
+  },
+  "timeouts": {
+    "tcp_connect_seconds": 3.0,
+    "ping_seconds": 2.0,
+    "dns_resolve_seconds": 4.0,
+    "subprocess_seconds": 10.0,
+    "http_check_seconds": 6.0
+  },
+  "network": {
+    "internet_test_urls": [
+      "https://www.google.com",
+      "https://www.microsoft.com"
+    ],
+    "dns_test_hostnames": [
+      "www.google.com",
+      "microsoft.com",
+      "update.microsoft.com"
+    ],
+    "ping_hosts": [],
+    "business_services": [
+      {
+        "name": "Example DMS (edit me)",
+        "host": "",
+        "port": 1433,
+        "enabled": false,
+        "note": "Set enabled=true and fill host/port with your dealership's actual internal service, e.g. DMS SQL server, document server, or line-of-business app."
+      }
+    ]
+  },
+  "printers": {
+    "network_printers": [
+      {
+        "name": "Example Showroom Printer (edit me)",
+        "host": "",
+        "enabled": false,
+        "raw_port": 9100,
+        "note": "Fill host with the printer IP/hostname to enable reachability tests."
+      }
+    ],
+    "max_jobs_listed_per_queue": 20
+  }
+}

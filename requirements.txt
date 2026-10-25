@@ -1,0 +1,4 @@
+streamlit>=1.32
+psutil>=5.9
+pandas>=2.0
+pytest>=8.0
