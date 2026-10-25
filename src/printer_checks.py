@@ -28,7 +28,7 @@ from .check_model import (
     make_result,
     safe_float,
 )
-from .network_checks import tcp_probe, ping_host
+from .network_checks import tcp_probe, ping_host, cfg_timeout
 
 CATEGORY = "Printer"
 
@@ -133,7 +133,7 @@ def check_installed_printers(cfg: dict) -> list[CheckResult]:
     # fall back to the default and are clamped to a sane range.
     max_jobs = int(safe_float(cfg["printers"].get("max_jobs_listed_per_queue", 20), 20, 1, 10000))
     try:
-        printers, method = _query_printers(cfg["timeouts"]["subprocess_seconds"])
+        printers, method = _query_printers(cfg_timeout(cfg, "subprocess_seconds"))
     except OSError as exc:
         return [make_result(
             name="Installed printers", category=CATEGORY, status=INFO,
@@ -217,7 +217,7 @@ def check_installed_printers(cfg: dict) -> list[CheckResult]:
 
     # Queues & pending jobs (best-effort, separate failure domain)
     try:
-        queues = _query_queues(cfg["timeouts"]["subprocess_seconds"])
+        queues = _query_queues(cfg_timeout(cfg, "subprocess_seconds"))
         for q in queues:
             qname = q.get("Name", "?")
             jobs = q.get("JobCount")
@@ -269,11 +269,11 @@ def check_spooler_service(cfg: dict) -> list[CheckResult]:
             expected="Windows host", recommendation="Run this tool on the dealership's Windows PCs.")]
     try:
         rc, out, err = _run(["powershell", "-NoProfile", "-NonInteractive",
-                             "-Command", _PS_SPOOLER], cfg["timeouts"]["subprocess_seconds"])
+                             "-Command", _PS_SPOOLER], cfg_timeout(cfg, "subprocess_seconds"))
         out = out.strip()
         if rc != 0 or not out:
             # fallback: sc query (read-only)
-            rc2, out2, _ = _run(["sc", "query", "Spooler"], cfg["timeouts"]["subprocess_seconds"])
+            rc2, out2, _ = _run(["sc", "query", "Spooler"], cfg_timeout(cfg, "subprocess_seconds"))
             if "RUNNING" in (out2 or "").upper():
                 return [make_result(name="Print Spooler service", category=CATEGORY, status=PASS,
                                     observed="Running (via 'sc query')", expected="Spooler running")]
@@ -338,8 +338,8 @@ def check_network_printers(cfg: dict, prior_results: list[CheckResult] | None = 
             expected="Configure printer IPs under printers.network_printers to enable tests",
             recommendation="Add showroom/service-advisor printer IPs in config.json for reachability checks.",
         )]
-    tcp_to = cfg["timeouts"]["tcp_connect_seconds"]
-    ping_to = cfg["timeouts"]["ping_seconds"]
+    tcp_to = cfg_timeout(cfg, "tcp_connect_seconds")
+    ping_to = cfg_timeout(cfg, "ping_seconds")
     # Corroboration: if the workstation's own network path is broken (no active
     # interface, or every gateway probe failed), unreachable printers are part
     # of a wider confirmed failure rather than individual device issues.
