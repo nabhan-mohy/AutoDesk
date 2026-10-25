@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import subprocess
+import time
 import urllib.request
 import urllib.error
 
@@ -53,7 +54,7 @@ def get_interfaces() -> dict[str, list[str]]:
     return out
 
 
-def check_interfaces() -> list[CheckResult]:
+def check_interfaces(cfg: dict) -> list[CheckResult]:
     try:
         nics = get_interfaces()
         if not nics:
@@ -90,8 +91,16 @@ def check_interfaces() -> list[CheckResult]:
 # --------------------------------------------------------------------------- #
 # Default gateway
 # --------------------------------------------------------------------------- #
-def discover_gateways() -> list[str]:
+def discover_gateways() -> tuple[list[str], str]:
+    """Return (gateway_ips, method).
+
+    method describes how reliable the discovery was:
+      - "routing table" : authoritative default route (psutil / /proc/net/route)
+      - "heuristic"     : parsed from an OS utility; uncertain
+      - "none"          : no gateway could be determined
+    """
     gateways: set[str] = set()
+    method = "none"
     # Preferred cross-platform source: /proc/net/route (Linux)
     try:
         with open("/proc/net/route") as fh:
@@ -102,6 +111,7 @@ def discover_gateways() -> list[str]:
                     gw = ".".join(str(int(gw_hex[i:i + 2], 16)) for i in (6, 4, 2, 0))
                     if gw != "0.0.0.0":
                         gateways.add(gw)
+                        method = "routing table"
     except OSError:
         pass
     try:
@@ -113,10 +123,12 @@ def discover_gateways() -> list[str]:
             try:
                 if ipaddress.ip_address(dest) in (ipaddress.ip_address("0.0.0.0"),):
                     gateways.add(gw)
+                    method = "routing table"
             except ValueError:
                 # default route may be shown as 'default'
                 if dest.lower() in ("default", "0.0.0.0/0"):
                     gateways.add(gw)
+                    method = "routing table"
     except Exception:
         pass
     if not gateways and _is_windows():
@@ -128,6 +140,7 @@ def discover_gateways() -> list[str]:
                 m = re.search(r"0\.0\.0\.0\s+0\.0\.0\.0\s+(\d+\.\d+\.\d+\.\d+)", line)
                 if m:
                     gateways.add(m.group(1))
+                    method = "heuristic"
         except (OSError, subprocess.SubprocessError):
             pass
     if not gateways and not _is_windows():
@@ -137,9 +150,10 @@ def discover_gateways() -> list[str]:
             m = re.search(r"default\s+via\s+(\d+\.\d+\.\d+\.\d+)", res.stdout or "")
             if m:
                 gateways.add(m.group(1))
+                method = "heuristic"
         except (OSError, subprocess.SubprocessError):
             pass
-    return sorted(gateways)
+    return sorted(gateways), method
 
 
 def ping_host(host: str, timeout_s: float) -> tuple[bool, float | None, str]:
@@ -173,9 +187,10 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def check_gateway(cfg: dict) -> list[CheckResult]:
+def check_gateway(cfg: dict, prior_results: list[CheckResult] | None = None
+                  ) -> list[CheckResult]:
     try:
-        gws = discover_gateways()
+        gws, method = discover_gateways()
         if not gws:
             return [make_result(
                 name="Default gateway", category=CATEGORY, status=WARNING,
@@ -186,22 +201,63 @@ def check_gateway(cfg: dict) -> list[CheckResult]:
             )]
         results = []
         timeout = cfg["timeouts"]["ping_seconds"]
+        tcp_timeout = cfg["timeouts"]["tcp_connect_seconds"]
+        # Corroborating evidence: did any *other* TCP probe already succeed in
+        # this run? If yes, routing works and an unresponsive gateway is most
+        # likely just blocking ICMP - never report an outage in that case.
+        other_tcp_ok = any(
+            r.status == PASS and ("TCP" in r.name or "Internet endpoint" in r.name)
+            for r in (prior_results or []))
         for gw in gws[:2]:
             ok, avg, info = ping_host(gw, timeout)
+            evidence = f"icmp: {info}"
             if ok:
-                status, rec = PASS, ""
+                # Ping succeeded -> authoritative proof of reachability.
+                status = PASS
+                rec = ""
+                observed = f"reachable ({info})"
             else:
-                status = FAIL
-                rec = ("Gateway does not respond to ping. Check the switch/cable first, then "
-                       "ask the network administrator whether the router/firewall blocks ICMP "
-                       "(a blocked ping is possible even when routing works).")
+                # A failed ping alone is NOT sufficient evidence of an outage:
+                # many routers/firewalls block ICMP. Try TCP fallback probes to
+                # common gateway ports before classifying.
+                tcp_ok = False
+                for port in (53, 80, 443):
+                    p_ok, _, _ = tcp_probe(gw, port, tcp_timeout)
+                    if p_ok:
+                        tcp_ok = True
+                        evidence += f"; tcp:{port} open"
+                        break
+                if tcp_ok:
+                    status = PASS
+                    rec = ""
+                    observed = f"reachable via TCP despite no ICMP reply ({evidence})"
+                elif method != "routing table" or other_tcp_ok:
+                    # Gateway discovered heuristically, or other traffic proves
+                    # routing works -> inconclusive, WARNING only.
+                    status = WARNING
+                    rec = ("Gateway did not answer ping or TCP probes, but this is "
+                           "inconclusive: discovery was heuristic and/or other network "
+                           "traffic succeeds, so the router probably just blocks ICMP. "
+                           "Verify with 'tracert <gateway>' before treating this as an outage.")
+                    observed = f"NOT confirmed reachable ({evidence})"
+                else:
+                    # Authoritative default route AND every probe (ICMP + TCP here
+                    # + other TCP checks in this run) failed. That combination is
+                    # sufficient evidence of an actual connectivity failure.
+                    status = FAIL
+                    rec = ("No route through the gateway appears to work: ping, direct TCP "
+                           "probes, and all other outbound TCP tests failed together. Check "
+                           "the physical link/cable and IP configuration (ipconfig), then "
+                           "escalate to the network team with these results.")
+                    observed = f"NOT responding to any probe, corroborated by failed TCP checks ({evidence})"
             results.append(make_result(
                 name=f"Gateway reachability {gw}", category=CATEGORY,
                 status=status,
-                observed=f"{'reachable' if ok else 'NOT reachable'} ({info})",
-                expected="Gateway responds to ping",
+                observed=observed,
+                expected="Gateway responds to ping or a TCP probe",
                 recommendation=rec,
-                details={"gateway": gw, "avg_ms": avg, "raw": info},
+                details={"gateway": gw, "avg_ms": avg, "discovery_method": method,
+                         "raw": info, "evidence": evidence},
             ))
         return results
     except Exception as exc:
@@ -361,18 +417,22 @@ def check_internet(cfg: dict) -> list[CheckResult]:
 # --------------------------------------------------------------------------- #
 # Internal business services (TCP)
 # --------------------------------------------------------------------------- #
-def tcp_probe(host: str, port: int, timeout: float) -> tuple[bool, str]:
+def tcp_probe(host: str, port: int,
+              timeout: float) -> tuple[bool, str, float | None]:
+    """Return (ok, message, latency_ms)."""
+    t0 = time.perf_counter()
     try:
         with socket.create_connection((host, int(port)), timeout=timeout):
-            return True, "TCP connection established"
+            ms = round((time.perf_counter() - t0) * 1000, 1)
+            return True, f"TCP connection established ({ms} ms)", ms
     except socket.timeout:
-        return False, f"Timed out after {timeout}s (host may be down, firewalled, or overloaded)"
+        return False, f"Timed out after {timeout}s (host may be down, firewalled, or overloaded)", None
     except ConnectionRefusedError:
-        return False, "Connection refused (host reachable but service/listener down)"
+        return False, "Connection refused (host reachable but service/listener down)", None
     except socket.gaierror as exc:
-        return False, f"Hostname could not be resolved: {exc}"
+        return False, f"Hostname could not be resolved: {exc}", None
     except OSError as exc:
-        return False, f"Network error: {exc}"
+        return False, f"Network error: {exc}", None
 
 
 def check_business_services(cfg: dict) -> list[CheckResult]:
@@ -393,7 +453,7 @@ def check_business_services(cfg: dict) -> list[CheckResult]:
         host = str(svc["host"]).strip()
         port = int(svc.get("port", 0))
         name = str(svc.get("name") or f"{host}:{port}")
-        ok, info = tcp_probe(host, port, timeout)
+        ok, info, _lat = tcp_probe(host, port, timeout)
         rec = "" if ok else (
             f"Cannot reach {name} at {host}:{port}. Verify the service is running on the server, "
             "check Windows Firewall / switch VLAN ACLs, and confirm the hostname/port in config.json. "
@@ -431,12 +491,16 @@ def check_ping_hosts(cfg: dict) -> list[CheckResult]:
 
 
 def run_network_checks(cfg: dict) -> list[CheckResult]:
-    runners = [check_interfaces, check_gateway, check_dns, check_internet,
-               check_business_services, check_ping_hosts]
+    # Order matters: interfaces and business-service TCP probes run first so
+    # the gateway check can use them as corroborating evidence (a failed ping
+    # alone must never produce FAIL).
+    runners = [check_interfaces, check_business_services, check_ping_hosts,
+               check_gateway, check_dns, check_internet]
     results: list[CheckResult] = []
     for fn in runners:
-        try:
-            results.extend(fn(cfg))
-        except Exception as exc:
-            results.append(error_result(fn.__name__, CATEGORY, exc))
+        if fn is check_gateway:
+            rs = fn(cfg, prior_results=results)
+        else:
+            rs = fn(cfg)
+        results.extend(rs)
     return results

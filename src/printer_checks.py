@@ -302,7 +302,7 @@ def check_network_printers(cfg: dict) -> list[CheckResult]:
         host = str(prn["host"]).strip()
         name = str(prn.get("name") or host)
         port = int(prn.get("raw_port", 9100))
-        ok_tcp, tcp_info = tcp_probe(host, port, tcp_to)
+        ok_tcp, tcp_info, _lat = tcp_probe(host, port, tcp_to)
         ok_ping, avg, ping_info = ping_host(host, ping_to)
         if ok_tcp:
             st = PASS

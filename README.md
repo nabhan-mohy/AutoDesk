@@ -1,0 +1,292 @@
+# AutoDesk IT Health Monitor
+
+**Version 1.0.0** — An automated PC, network, and printer readiness checker for automotive dealership IT environments.
+
+---
+
+## 1. Project Overview & Dealership Use Case
+
+Showroom PCs, billing workstations, and service-advisor systems must be ready *before* customers and staff depend on them. When something breaks — a printer offline, the DMS server unreachable, DNS failing after a DHCP renewal — the IT Support Executive needs fast, evidence-based answers instead of guesswork.
+
+**AutoDesk IT Health Monitor** runs every diagnostic with one button and produces:
+
+- A clear **READY / READY WITH ISSUES / NOT READY** workstation verdict,
+- PASS / WARNING / FAIL results with the observed value, expected condition, and a plain-language **recommendation** for each issue,
+- Timestamped **CSV, JSON, and HTML reports** saved locally for ticketing and escalation.
+
+The tool is **read-only**: it never clears print queues, restarts services, prints test pages, or performs any remediation. It also never claims a printer can physically print based only on service status or network reachability.
+
+### Typical workflow
+
+1. Technician opens the dashboard on the affected PC (`streamlit run app.py`).
+2. Clicks **Run Full Health Check** (~5–20 seconds).
+3. Reviews summary cards and the filterable results table.
+4. Exports the CSV/HTML report and attaches it to the support ticket.
+
+---
+
+## 2. Features & Technology Stack
+
+### Features
+
+| Area | What is checked |
+|---|---|
+| **System** | Hostname, username, OS version/build, architecture, CPU %, RAM %, per-drive disk space, uptime, check timestamp |
+| **Network** | Active interfaces + IPv4 addresses, default gateway discovery & reachability (ping + TCP fallback probes), DNS servers, DNS resolution of configured hostnames, internet endpoints (HTTP HEAD), TCP tests to configured internal business services (DMS, SQL, document servers), optional ping hosts |
+| **Printer** | Installed printers via Windows APIs (WMI/PowerShell `Get-PrintQueue`), default printer, queue status & status messages, pending job counts, Print Spooler service state, optional reachability tests for configured network printers (TCP:9100 raw port + ICMP) |
+| **Assessment** | Single-button full run with live progress and elapsed time, individual category runs, refresh/rerun, searchable + filterable results tables, per-issue recommendations |
+| **Reporting** | Timestamped CSV + JSON + HTML in `reports/`, plus in-browser download buttons; hostname and app version embedded in every row |
+| **Configuration** | All thresholds, endpoints, ports, printer addresses, and timeouts live in `config.json` — nothing dealership-specific is hardcoded |
+
+### Technology stack
+
+- **Python 3.12+**
+- **Streamlit** — local web dashboard
+- **psutil** — CPU/RAM/disk/uptime/interfaces/routes
+- **Standard library** — `socket`, `subprocess`, `urllib`, `dns` (optional dnspython), `csv`, `json`, `ipaddress`
+- **Windows-native commands** used where appropriate: `ping`, `route print`, `ipconfig /all`, PowerShell `Get-Printer` / `Get-PrintQueue` / `Get-Service`
+- **pytest** — unit tests with all hardware/network dependencies mocked
+
+No Docker, no cloud, no paid APIs, no database. Everything runs and stays on the local machine.
+
+---
+
+## 3. Architecture & Project Structure
+
+```
+autodesk-it-health-monitor/
+├── app.py                    # Streamlit UI: buttons, progress, tables, downloads
+├── config.json               # Thresholds, endpoints, printers, timeouts
+├── requirements.txt
+├── pytest.ini
+├── .gitignore                # excludes reports/, __pycache__, venv, etc.
+├── README.md
+├── src/
+│   ├── __init__.py
+│   ├── check_model.py        # CheckResult dataclass, PASS/WARNING/FAIL/INFO, classify_percent()
+│   ├── config_loader.py      # load + validate + merge-with-defaults for config.json
+│   ├── system_checks.py      # identity, CPU, RAM, disks, uptime
+│   ├── network_checks.py     # interfaces, gateway, DNS, internet, TCP services, ping
+│   ├── printer_checks.py     # WMI/PowerShell enumeration, spooler, queues, network printers
+│   ├── health_engine.py      # orchestrates categories, catches crashes, builds report dict
+│   └── reporting.py          # CSV / JSON / HTML writers + byte exporters for downloads
+├── reports/                  # generated evidence files (gitignored contents)
+│   └── .gitkeep
+└── tests/
+    ├── test_health_engine.py   # summarization, thresholds, crash isolation, progress cb
+    ├── test_network_checks.py  # gateway classification rules (all probes mocked)
+    ├── test_reporting.py       # CSV/JSON/HTML structure and content
+    └── test_config_loader.py   # defaults merging, validation, bad-config handling
+```
+
+**Design principles**
+
+- Every check returns a list of `CheckResult`; an exception inside any check is converted into a FAIL result (`error_result`) so **one broken diagnostic can never crash the run**.
+- The health engine runs categories independently and records total duration.
+- Status semantics are deliberately conservative (see §8 Gateway classification).
+- Subprocesses always use argument lists (no shell strings), timeouts, and captured output — nothing from the UI is ever executed as a command.
+
+---
+
+## 4. Installation & Launch
+
+### Prerequisites
+
+- Windows 11 (primary target) — Linux/macOS also run, with printer checks gracefully reporting "not applicable".
+- Python 3.12+ with `pip`. **No administrator privileges required.**
+
+### Setup (PowerShell)
+
+```powershell
+cd autodesk-it-health-monitor
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+### Launch the dashboard
+
+```powershell
+python -m streamlit run app.py
+```
+
+Open the URL printed in the terminal — normally **http://localhost:8501**.
+
+### Run the tests
+
+```powershell
+python -m pytest -q
+```
+
+Expected output: `29 passed`.
+
+---
+
+## 5. Configuration (`config.json`)
+
+Edit `config.json` in any text editor, save, then click **Reload config** in the sidebar (or restart Streamlit). Invalid values fall back to safe defaults with a visible warning.
+
+### Resource thresholds (percent)
+
+```json
+"thresholds": {
+  "cpu_warning_percent": 75.0,      "cpu_fail_percent": 95.0,
+  "memory_warning_percent": 80.0,   "memory_fail_percent": 95.0,
+  "disk_warning_percent": 85.0,     "disk_fail_percent": 95.0,
+  "disk_min_free_gb_warning": 10.0
+}
+```
+
+### Timeouts (seconds) — keep checks from hanging
+
+```json
+"timeouts": {
+  "tcp_connect_seconds": 3.0, "ping_seconds": 2.0,
+  "dns_resolve_seconds": 4.0, "subprocess_seconds": 10.0,
+  "http_check_seconds": 6.0
+}
+```
+
+### Network endpoints
+
+```json
+"network": {
+  "internet_test_urls": ["https://www.google.com", "https://www.microsoft.com"],
+  "dns_test_hostnames": ["www.google.com", "microsoft.com", "update.microsoft.com"],
+  "ping_hosts": [],
+  "business_services": [
+    { "name": "DMS SQL Server", "host": "dms-sql.yourdomain.local",
+      "port": 1433, "enabled": true }
+  ]
+}
+```
+
+- Add one entry per **internal** line-of-business service you need tested (DMS app server, SQL instance, document server, license server…). Internet reachability does **not** imply internal services are reachable — that is exactly why these TCP tests exist.
+- `ping_hosts`: e.g. file server or domain controller hostnames/IPs. Failed pings produce WARNING (many servers block ICMP), not FAIL.
+- **Do not commit your dealership's real internal IPs to a shared repository** — `config.json` is included here as a template with placeholders disabled by default.
+
+### Network printers
+
+```json
+"printers": {
+  "network_printers": [
+    { "name": "Showroom HP LaserJet", "host": "192.168.10.50",
+      "enabled": true, "raw_port": 9100 }
+  ],
+  "max_jobs_listed_per_queue": 20
+}
+```
+
+Set `enabled: true` and fill `host` (IP or hostname) to activate reachability tests (TCP 9100 raw printing port + ICMP). Results are labelled *reachable/unreachable*, never "can print".
+
+---
+
+## 6. Running Diagnostics & Exporting Reports
+
+- **Run Full Health Check** — executes System → Network → Printer with a live progress bar and elapsed-time readout.
+- **Individual sections** — tick only System / Network / Printer to run a subset.
+- **Refresh / Rerun** — the sidebar reruns the last selection; results update in place.
+- **Results tables** — searchable by check name and filterable by status/category; every WARNING/FAIL row shows its recommendation under **Recommended next actions**.
+- **Reports** — each run auto-writes to `reports/health_<hostname>_<YYYYMMDD_HHMMSS>.{csv,json,html}`. Download buttons for all three formats appear below the results.
+  - **CSV** — columns: check_name, category, status, observed_value, expected_condition, recommendation, timestamp, hostname, app_version (Excel-ready).
+  - **JSON** — full structured report including per-check `details` dicts.
+  - **HTML** — self-contained styled page suitable for emailing the IT team.
+
+Reports contain only diagnostic data (hostnames, IP addresses of configured devices, utilization numbers). **No passwords, tokens, or personal documents are collected.**
+
+---
+
+## 7. Troubleshooting Common Errors
+
+| Symptom | Cause / Fix |
+|---|---|
+| `streamlit` not recognized | Use `python -m streamlit run app.py`; ensure the venv is activated and `pip install -r requirements.txt` succeeded. |
+| Port 8501 already in use | Another Streamlit instance is running. Close it or run `python -m streamlit run app.py --server.port 8502`. |
+| Dashboard loads but printer section says "WMI requires Windows" | Expected on non-Windows hosts. On Windows 11, verify the **Print Spooler** service is running (`services.msc`). |
+| "Printer enumeration denied / access error" | Some locked-down GPOs restrict WMI for standard users. Run as the logged-in user (admin not normally needed); if it persists, note the message in the ticket — the tool intentionally does not retry with elevation. |
+| Many network FAILs at once | Physical layer first: Ethernet cable / Wi-Fi, then `ipconfig` for a valid IPv4 address, then compare against the gateway result. |
+| Gateway shows WARNING "inconclusive" | Router is likely blocking ICMP and no corroborating failure exists. This is *not* an outage — confirm with `tracert <gateway>` if suspicious. |
+| Checks hang near timeout settings | Lower `timeouts.*` values in `config.json`; each probe is individually capped so a dead host cannot stall the whole run. |
+| Config edit has no effect | Click **Reload config** in the sidebar; a JSON syntax error will be shown with the parser message and defaults restored. |
+| Tests fail with import errors | Ensure you run `python -m pytest` from the project root (where `pytest.ini` lives). |
+
+---
+
+## 8. Security, Privacy & Status-Semantics Notes
+
+- **Read-only diagnostics.** No remediation: queues are never cleared, services never restarted, test pages never printed.
+- **Safe subprocess usage.** All external commands are fixed argument lists (`["ping","-n","2",host]`, PowerShell `Get-PrintQueue`, …) with timeouts; **arbitrary input from the UI is never executed**.
+- **No admin rights required** for normal operation; permission-denied paths degrade gracefully to INFO/WARNING with explanations.
+- **Local-only.** No telemetry, no uploads; all reports stay in `reports/` on the machine.
+- **No credential collection**, no browsing history, no file contents.
+- **No scanning beyond configured targets.** Only the gateway, explicitly listed hosts/services/printers are probed — no subnet sweeps, no arbitrary public IP ranges.
+- **Gateway classification policy** (deliberate anti-false-positive design):
+  - **PASS** — ping succeeds, or a TCP probe reaches the gateway despite blocked ICMP.
+  - **WARNING** — gateway discovered heuristically, probes inconclusive, or other outbound TCP traffic succeeds (proving routing works while ICMP is filtered).
+  - **FAIL** — reserved for sufficient evidence: authoritative default route **and** failed ICMP **and** failed direct TCP probes **and** no successful outbound TCP check anywhere in the same run.
+  - A failed ping alone is **never** reported as a confirmed outage.
+
+---
+
+## 9. Unit Tests — How to Run & Actual Results
+
+```powershell
+python -m pytest -q            # quick summary
+python -m pytest -v            # per-test detail
+```
+
+Tests mock psutil, sockets, ping/subprocess, WMI, and filesystem-dependent calls, so they require **no printer, no admin rights, and no internet connection**. Coverage includes: status classification and threshold boundaries, config validation/default merging, report generation (CSV/JSON/HTML structure), crash isolation (a raising check becomes FAIL without killing the run), progress-callback completion, missing printers, DNS failures, timeouts, permission errors, and all eight gateway classification rules.
+
+**Actual result in the development environment (Python 3.12, Linux container):**
+
+```
+.............................                                            [100%]
+29 passed in 0.20s
+```
+
+| Suite | Tests | Focus |
+|---|---|---|
+| `test_health_engine.py` | 8 | summarize/verdict, thresholds, crash isolation, progress |
+| `test_network_checks.py` | 8 | gateway PASS/WARNING/FAIL evidence rules (mocked) |
+| `test_config_loader.py` | 8 | defaults merging, validation, corrupt-file handling |
+| `test_reporting.py` | 5 | CSV rows, JSON schema, HTML content, filename safety |
+
+An end-to-end smoke run of `run_full_check()` was also executed on this environment: the dashboard launched (HTTP 200 on :8501), all categories completed in ~1.3 s, and CSV/JSON/HTML reports were written successfully. Windows-printer code paths (WMI/PowerShell) are exercised only on Windows 11 hosts; elsewhere they return clear "not applicable" INFO results rather than crashing.
+
+---
+
+## 10. Screenshots
+
+Add real captures to `docs/screenshots/` and reference them here once deployed on a Windows 11 workstation:
+
+1. `01_dashboard_top.png` — title, overall READY banner, system resource cards, last scan timestamp.
+2. `02_run_progress.png` — progress bar during **Run Full Health Check** with elapsed time.
+3. `03_network_results.png` — network table showing gateway/DNS/internet/TCP-service rows.
+4. `04_printer_results.png` — installed printers, default printer, spooler state, queue jobs.
+5. `05_reports_downloads.png` — CSV/JSON/HTML download buttons and `reports/` folder contents.
+6. `06_html_report.png` — the exported HTML report opened in a browser.
+
+*(Capture with Win+Shift+S after launching the app; keep screenshots free of real internal hostnames if publishing publicly.)*
+
+---
+
+## 11. Known Limitations & Future Improvements
+
+**Limitations (by design)**
+- Printer "status" reflects Windows spooler/queue metadata and network reachability — physical print capability cannot be verified without printing a page, which this tool refuses to do automatically.
+- Some WMI/queue details require the current user's permissions; restricted environments yield partial INFO/WARNING results.
+- Gateway and ICMP results are inherently heuristic on networks that filter ICMP (mitigated by the classification policy above).
+- Single-workstation scope: no central server, fleet dashboard, or scheduled background runs yet.
+
+**Future improvements**
+- Scheduled automatic scans + desktop notification when a scan turns NOT READY.
+- Historical trend charts (CPU/RAM/disk over time) persisted locally as SQLite/Parquet.
+- Signed PDF report option and one-click copy-to-clipboard ticket summary.
+- Optional agent/server mode for showroom-wide visibility.
+- Additional adapters: antivirus service state, Windows Update pending-reboot detection, mapped-drive verification, badge-reader/TPM checks.
+
+---
+
+## License / Support
+
+Internal tool for dealership IT support. Modify freely; keep reports on local machines per your data-handling policy.
