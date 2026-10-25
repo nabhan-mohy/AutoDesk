@@ -67,12 +67,23 @@ jobs:
           if-no-files-found: warn
       - name: Launch Streamlit and verify HTTP 200
         run: |
+          set -euo pipefail
           nohup python -m streamlit run app.py --server.headless true \
               --server.port 8501 > streamlit.log 2>&1 &
+          # Wait for the server to come up (it may answer non-200 briefly while booting)
+          up=""
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8501/healthz > /dev/null; then echo "Streamlit up"; break; fi
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8501/ || true)
+            if [ "$code" = "200" ]; then up="yes"; echo "Streamlit up after ~$((i*2))s"; break; fi
             sleep 2
           done
-          curl -sf http://localhost:8501/ -o page.html
+          echo "--- streamlit.log ---"; tail -n 30 streamlit.log
+          if [ -z "$up" ]; then
+            echo "::error::Streamlit did not return HTTP 200 within 60s"
+            exit 1
+          fi
+          # Explicit hard assertion on the status code of the main page
+          code=$(curl -s -o page.html -w '%{http_code}' http://localhost:8501/)
+          echo "GET / -> HTTP $code"
+          test "$code" = "200"
           grep -qi "streamlit" page.html
-          echo "--- streamlit.log ---"; tail -n 20 streamlit.log
