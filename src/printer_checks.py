@@ -28,24 +28,33 @@ from .check_model import (
     make_result,
     safe_float,
 )
-from .network_checks import tcp_probe, ping_host, cfg_timeout
+from .network_checks import tcp_probe, ping_host
 
-CATEGORY = "Printer"
 
-# Win32_Printer PrinterStatus codes (MS documentation)
-STATUS_MAP = {
-    1: "Other", 2: "Unknown", 3: "Idle", 4: "Printing", 5: "Warmup",
-    6: "Stopped Printing", 7: "Offline", 8: "Not Available",
+# Per-key defaults mirror config_loader.DEFAULT_CONFIG["timeouts"].
+# Bounds (0.001 .. 120 s) mirror the range validation in
+# config_loader.validate_config so a hand-edited config can never
+# produce a nonsensical timeout (0, negative, or huge).
+_TIMEOUT_DEFAULTS: dict[str, float] = {
+    "tcp_connect_seconds": 3.0,
+    "ping_seconds": 2.0,
+    "dns_resolve_seconds": 4.0,
+    "subprocess_seconds": 10.0,
+    "http_check_seconds": 6.0,
 }
 
 
-def _is_windows() -> bool:
-    return os.name == "nt"
+def cfg_timeout(cfg: dict, key: str) -> float:
+    """Return a validated timeout from ``cfg['timeouts'][key]``.
 
-
-def _run(cmd: list[str], timeout: float) -> tuple[int, str, str]:
-    res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    return res.returncode, res.stdout or "", res.stderr or ""
+    Falls back to the built-in default for that key, then clamps to the
+    same sane bounds used by ``config_loader.validate_config``. Never
+    raises - a malformed value degrades to the default rather than
+    crashing the check that requested it.
+    """
+    default = _TIMEOUT_DEFAULTS.get(key, 3.0)
+    raw = (cfg.get("timeouts", {}) or {}).get(key, default)
+    return safe_float(raw, default, 0.001, 120.0)
 
 
 _PS_GET_PRINTERS = r'''
