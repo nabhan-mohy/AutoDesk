@@ -97,3 +97,56 @@ def test_tcp_probe_returns_latency_tuple():
     assert ok is False
     assert isinstance(msg, str)
     assert ms is None
+
+
+# --------------------------------------------------------------------------- #
+# Internet endpoint classification (issue #1: no false outages from one site)
+# --------------------------------------------------------------------------- #
+CFG_NET = {
+    "timeouts": {"http_check_seconds": 1, "tcp_connect_seconds": 1,
+                 "ping_seconds": 1, "dns_resolve_seconds": 1},
+    "network": {"internet_test_urls": ["https://a.test", "https://b.test"]},
+}
+
+
+def _endpoint(results, url):
+    m = [r for r in results if r.name == f"Internet endpoint: {url}"]
+    assert m, [r.name for r in results]
+    return m[0]
+
+
+def test_internet_one_endpoint_down_other_up_is_warning():
+    """A single failing endpoint must be WARNING when another succeeds."""
+    probes = {"https://a.test": (True, "HTTP 200"), "https://b.test": (False, "No response: timeout")}
+    with patch.object(nc, "_http_probe", side_effect=lambda u, t: probes[u]):
+        res = nc.check_internet(CFG_NET)
+    assert _endpoint(res, "https://a.test").status == PASS
+    assert _endpoint(res, "https://b.test").status == WARNING
+    summary = [r for r in res if r.name == "Internet connectivity summary"][0]
+    assert summary.status == WARNING  # never FAIL when partial success
+
+
+def test_internet_all_fail_but_tcp_works_elsewhere_is_warning():
+    """Zero HTTP successes but corroborated outbound TCP -> inconclusive, WARNING."""
+    prior = [CheckResult(name="Gateway reachability 10.0.0.1", category="Network", status=PASS)]
+    with patch.object(nc, "_http_probe", return_value=(False, "No response: blocked")):
+        res = nc.check_internet(CFG_NET, prior_results=prior)
+    assert all(_endpoint(res, u).status == WARNING for u in ("https://a.test", "https://b.test"))
+    summary = [r for r in res if r.name == "Internet connectivity summary"][0]
+    assert summary.status == WARNING
+
+
+def test_internet_confirmed_outage_all_fail_no_corroboration_is_fail():
+    """FAIL only when every endpoint fails AND nothing else got outbound."""
+    prior = [CheckResult(name="Service TCP: DMS (10.1.1.5:1433)", category="Network", status=FAIL)]
+    with patch.object(nc, "_http_probe", return_value=(False, "No response: unreachable")):
+        res = nc.check_internet(CFG_NET, prior_results=prior)
+    assert all(_endpoint(res, u).status == FAIL for u in ("https://a.test", "https://b.test"))
+    summary = [r for r in res if r.name == "Internet connectivity summary"][0]
+    assert summary.status == FAIL
+
+
+def test_internet_all_success_is_pass_no_summary_issue():
+    with patch.object(nc, "_http_probe", return_value=(True, "HTTP 200")):
+        res = nc.check_internet(CFG_NET)
+    assert all(r.status == PASS for r in res)

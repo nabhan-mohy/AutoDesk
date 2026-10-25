@@ -181,9 +181,18 @@ def check_installed_printers(cfg: dict) -> list[CheckResult]:
             code = 2
         status_name = STATUS_MAP.get(code, f"Code {code}")
         offline_flag = str(p.get("WorkOffline", "")).lower() in ("true", "1")
+        # IMPORTANT: Win32_Printer status codes are device-reported hints that
+        # Windows updates lazily; 'Offline' can also mean the OS simply has no
+        # recent conversation with the device (sleeping MFD, USB re-plug,
+        # pending driver handshake). We therefore NEVER assert a confirmed
+        # hardware outage from these codes alone - worst case is WARNING with
+        # verification steps. A FAIL would require corroborated evidence such
+        # as a failed network probe, which is reported separately.
         if offline_flag or code == 7:
-            st, rec = FAIL, (f"'{name}' reports OFFLINE/not available. Check power, cable/Wi-Fi, "
-                             "and the printer's own network settings; reprint a document after it returns online.")
+            st, rec = WARNING, (f"'{name}' is marked OFFLINE/not available by Windows. This is "
+                                "device-reported and can be stale - verify power, cable/Wi-Fi and "
+                                "the printer's own network page, then send one test document from "
+                                "Windows to confirm before treating it as down.")
         elif code in (6,):
             st, rec = WARNING, (f"'{name}' is 'Stopped Printing'. Look for errors on the device panel "
                                 "(paper jam, low toner, open cover) and check the queue below.")
@@ -197,7 +206,10 @@ def check_installed_printers(cfg: dict) -> list[CheckResult]:
             expected="Idle / Printing (device reachable and ready)",
             recommendation=rec,
             details={"status_code": code, "port": p.get("PortName", ""),
-                     "server": p.get("ServerName", ""), "note": "Device readiness inferred from OS-reported status only; physical printing was NOT tested."},
+                     "server": p.get("ServerName", ""),
+                     "note": ("Device-reported OS status only - ambiguous by nature. Physical "
+                              "printing was NOT tested and an 'offline' flag does not prove a "
+                              "hardware failure.")},
         ))
 
     # Queues & pending jobs (best-effort, separate failure domain)
@@ -285,7 +297,19 @@ def check_spooler_service(cfg: dict) -> list[CheckResult]:
         return [error_result("Print Spooler service", CATEGORY, exc)]
 
 
-def check_network_printers(cfg: dict) -> list[CheckResult]:
+def check_network_printers(cfg: dict, prior_results: list[CheckResult] | None = None
+                           ) -> list[CheckResult]:
+    """Optional reachability tests for configured network printers.
+
+    Evidence layers kept distinct:
+      - device-reported status  -> 'Printer status:' results (WARNING max)
+      - spooler service state   -> 'Print Spooler service' result
+      - queue state             -> 'Queue:' results
+      - network reachability    -> this function
+    A printer that answers neither ping nor TCP is most often sleeping or
+    filtering ICMP/raw ports, so we report WARNING unless the whole local
+    network is also failing (corroborated evidence), in which case FAIL.
+    """
     results: list[CheckResult] = []
     printers = [p for p in cfg["printers"].get("network_printers", [])
                 if isinstance(p, dict) and p.get("enabled") and str(p.get("host", "")).strip()]
@@ -298,10 +322,20 @@ def check_network_printers(cfg: dict) -> list[CheckResult]:
         )]
     tcp_to = cfg["timeouts"]["tcp_connect_seconds"]
     ping_to = cfg["timeouts"]["ping_seconds"]
+    # Corroboration: if the workstation's own network path is broken (no active
+    # interface, or every gateway probe failed), unreachable printers are part
+    # of a wider confirmed failure rather than individual device issues.
+    local_net_broken = any(
+        r.status == FAIL and (r.name == "Network interfaces"
+                              or r.name.startswith("Gateway reachability"))
+        for r in (prior_results or []))
     for prn in printers:
         host = str(prn["host"]).strip()
         name = str(prn.get("name") or host)
-        port = int(prn.get("raw_port", 9100))
+        try:
+            port = int(prn.get("raw_port", 9100))
+        except (TypeError, ValueError):
+            port = 9100
         ok_tcp, tcp_info, _lat = tcp_probe(host, port, tcp_to)
         ok_ping, avg, ping_info = ping_host(host, ping_to)
         if ok_tcp:
@@ -314,17 +348,27 @@ def check_network_printers(cfg: dict) -> list[CheckResult]:
             rec = (f"'{name}' responds to ping but the raw printing port {port} is closed. Verify the "
                    "printer uses port 9100/JetDirect or configure the correct port; the device may also "
                    "need a reboot by authorized staff.")
-        else:
+        elif local_net_broken:
             st = FAIL
             obs = f"Unreachable: ping failed ({ping_info}); TCP:{port} failed ({tcp_info})"
-            rec = (f"'{name}' at {host} is unreachable. Check printer power/network cable/Wi-Fi, then "
-                   "ask the network team whether the printer VLAN/ACL changed. Note: even when reachable, "
-                   "this does not prove the device can physically print.")
+            rec = (f"'{name}' at {host} is unreachable AND the workstation's own network checks are "
+                   "failing, so this is likely part of a wider connectivity outage. Fix the PC's "
+                   "network connection first, then re-test the printer.")
+        else:
+            # No corroboration: many printers sleep deeply or block ICMP and
+            # non-standard raw ports. Do NOT assert an outage from probes alone.
+            st = WARNING
+            obs = f"Not confirmed reachable: ping failed ({ping_info}); TCP:{port} failed ({tcp_info})"
+            rec = (f"'{name}' at {host} answered neither ping nor TCP:{port}. This is inconclusive: "
+                   "the device may be asleep, filter ICMP, or use a different print port. Check its "
+                   "control-panel network page and print a configuration page before treating it as down. "
+                   "Note: even when reachable, this does not prove the device can physically print.")
         results.append(make_result(
             name=f"Network printer: {name} ({host})", category=CATEGORY, status=st,
             observed=obs, expected="Printer IP reachable (ping and/or raw port 9100)",
             recommendation=rec,
-            details={"host": host, "port": port, "ping_ok": ok_ping, "tcp_ok": ok_tcp, "avg_ms": avg},
+            details={"host": host, "port": port, "ping_ok": ok_ping, "tcp_ok": ok_tcp,
+                     "avg_ms": avg, "evidence": "probes only; no physical print test performed"},
         ))
     return results
 
@@ -333,7 +377,10 @@ def run_printer_checks(cfg: dict) -> list[CheckResult]:
     results: list[CheckResult] = []
     for fn in (check_installed_printers, check_spooler_service, check_network_printers):
         try:
-            results.extend(fn(cfg))
+            if fn is check_network_printers:
+                results.extend(fn(cfg, prior_results=results))
+            else:
+                results.extend(fn(cfg))
         except Exception as exc:
             results.append(error_result(fn.__name__, CATEGORY, exc))
     return results

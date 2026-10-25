@@ -118,7 +118,7 @@ Open the URL printed in the terminal — normally **http://localhost:8501**.
 python -m pytest -q
 ```
 
-Expected output: `29 passed`.
+Expected output: `49 passed`.
 
 ---
 
@@ -241,15 +241,16 @@ Tests mock psutil, sockets, ping/subprocess, WMI, and filesystem-dependent calls
 
 ```
 .............................                                            [100%]
-29 passed in 0.20s
+49 passed in 0.25s
 ```
 
 | Suite | Tests | Focus |
 |---|---|---|
 | `test_health_engine.py` | 8 | summarize/verdict, thresholds, crash isolation, progress |
-| `test_network_checks.py` | 8 | gateway PASS/WARNING/FAIL evidence rules (mocked) |
-| `test_config_loader.py` | 8 | defaults merging, validation, corrupt-file handling |
-| `test_reporting.py` | 5 | CSV rows, JSON schema, HTML content, filename safety |
+| `test_network_checks.py` | 12 | gateway PASS/WARNING/FAIL evidence rules + internet endpoint false-outage rules (mocked) |
+| `test_printer_checks.py` | 8 | offline status => WARNING never FAIL, probe-only failure inconclusive, FAIL requires corroborated local outage, non-Windows graceful degradation |
+| `test_config_loader.py` | 16 | defaults merging, threshold bounds (warn<=fail, 0-100), every printer host/port validated even when disabled, malformed entries, timeout bounds, corrupt-file handling |
+| `test_reporting.py` | 4 | CSV rows, JSON schema, HTML content, filename safety |
 
 An end-to-end smoke run of `run_full_check()` was also executed on this environment: the dashboard launched (HTTP 200 on :8501), all categories completed in ~1.3 s, and CSV/JSON/HTML reports were written successfully. Windows-printer code paths (WMI/PowerShell) are exercised only on Windows 11 hosts; elsewhere they return clear "not applicable" INFO results rather than crashing.
 
@@ -290,3 +291,39 @@ Add real captures to `docs/screenshots/` and reference them here once deployed o
 ## License / Support
 
 Internal tool for dealership IT support. Modify freely; keep reports on local machines per your data-handling policy.
+
+## Continuous integration (GitHub Actions)
+
+`.github/workflows/ci.yml` runs the full unit-test suite automatically on every
+push/PR to `main`, across a matrix of **ubuntu-latest and windows-latest** runners
+with Python **3.12 and 3.13**. All hardware, printer and network dependencies are
+mocked in tests, so CI never needs real devices or internet access. The workflow
+also verifies that `app.py` parses cleanly.
+
+> Note: GitHub-hosted `windows-latest` runners provide PowerShell and the CIM
+> cmdlets, so printer-enumeration code paths can be smoke-checked there via the
+> mocked suites; the manual Windows 11 checklist below still applies for live
+> device validation before rolling out to showroom PCs.
+
+## Status classification rules (how FAIL/WARNING are decided)
+
+The tool is deliberately conservative about claiming outages:
+
+| Situation | Status | Why |
+|---|---|---|
+| Gateway ping succeeds (or TCP probe reaches it) | PASS | Direct proof of reachability |
+| Gateway discovered heuristically, probes inconclusive, or ICMP blocked while other traffic works | WARNING | A failed ping alone is never treated as an outage |
+| Authoritative default route + all gateway probes fail + every other outbound TCP check also fails | FAIL | Corroborated evidence of a real connectivity failure |
+| One internet endpoint down while another succeeds | WARNING (endpoint) + WARNING (summary) | Single site may be down/block HEAD/proxy-filtered; internet works |
+| All endpoints fail but other outbound TCP succeeded earlier | WARNING | HTTP egress filtering or captive portal, not proven outage |
+| All endpoints fail and nothing else got outbound | FAIL | Confirmed internet outage |
+| Windows reports printer Offline/Not Available/Unknown | WARNING | Device-reported status is ambiguous/stale; never asserts hardware failure |
+| Configured network printer answers neither ping nor TCP, PC network otherwise healthy | WARNING | Printer may be asleep or filtering probes - inconclusive |
+| Network printer unreachable AND workstation interface/gateway checks also failing | FAIL | Part of a wider corroborated outage |
+| Print Spooler service stopped | FAIL | Definitive, locally verifiable service failure |
+
+Four evidence layers are kept distinct in printer diagnostics: **device-reported
+status**, **spooler service state**, **queue/job state**, and **network
+reachability**. No layer alone is used to claim the device cannot physically
+print, and the tool never clears queues, restarts services, or prints test pages.
+
