@@ -282,9 +282,24 @@ def check_spooler_service(cfg: dict) -> list[CheckResult]:
                 observed=f"Could not determine spooler state: {(err or out2 or '').strip()[:150]}",
                 expected="Spooler service Running",
                 recommendation="Open services.msc and check 'Print Spooler'. (This tool does not restart services automatically.)")]
-        data = json.loads(out)
+        try:
+            data = json.loads(out)
+        except json.JSONDecodeError as exc:
+            return [make_result(
+                name="Print Spooler service", category=CATEGORY, status=WARNING,
+                observed=f"Spooler query returned unparsable output: {exc}; raw: {out[:120]!r}",
+                expected="PowerShell Get-Service returns JSON",
+                recommendation="Open services.msc and check 'Print Spooler' manually. "
+                               "(This tool does not restart services automatically.)")]
+        if isinstance(data, list):  # defensive: unexpected multi-object output
+            data = data[0] if data and isinstance(data[0], dict) else {}
+        if not isinstance(data, dict):
+            data = {}
         status = str(data.get("Status", "")).lower()
-        if status in ("running", "1"):
+        # PowerShell renders ControlSet services as 'Running'; accept numeric
+        # CIM state codes (1 = Stopped ... 4 = Running) too so a running
+        # spooler is never misread as stopped.
+        if status in ("running", "4"):
             return [make_result(name="Print Spooler service", category=CATEGORY, status=PASS,
                                 observed=f"Status={data.get('Status')}, StartType={data.get('StartType')}",
                                 expected="Spooler Running (Automatic)")]

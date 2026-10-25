@@ -5,7 +5,7 @@ name: App smoke test
 # full health check executes and CSV/JSON/HTML reports are generated.
 on:
   push:
-    branches: [main]
+    branches: [main, master]   # matches the repository's default branch name
   pull_request:
   schedule:
     - cron: "0 6 * * 1"   # weekly Monday sanity run
@@ -22,29 +22,68 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
-      - name: Full health check + report generation (headless, mocked-free)
+      - name: Full health check + report generation (headless, real checks)
         run: |
           python - <<'PY'
+          import os
+          # Uses the ACTUAL exported API of src/reporting.py:
+          #   write_reports(report, out_dir=None) -> {"csv": path, "json": path, "html": path}
           from src.health_engine import run_full_check
-          from src.reporting import generate_reports
+          from src.reporting import write_reports
+
           rep = run_full_check()
           assert rep["results"], "no results produced"
-          assert rep["summary"]["overall"] in ("READY", "READY WITH ISSUES", "NOT READY")
-          paths = generate_reports(rep)
-          for kind, p in paths.items():
-              import os
-              assert os.path.exists(p) and os.path.getsize(p) > 0, f"{kind} report missing"
-              print(f"{kind}: {p} ({os.path.getsize(p)} bytes)")
+          assert rep["summary"]["overall"] in ("READY", "READY WITH ISSUES", "NOT READY"), \
+              f'unexpected overall status: {rep["summary"]["overall"]}'
+
+          out_dir = os.path.join("reports", "smoke")
+          paths = write_reports(rep, out_dir=out_dir)
+          assert set(paths) == {"csv", "json", "html"}, f"missing formats: {paths}"
+          for kind, p in sorted(paths.items()):
+              if not os.path.isfile(p):
+                  raise SystemExit(f"FAIL: {kind} report file missing: {p}")
+              size = os.path.getsize(p)
+              if size <= 0:
+                  raise SystemExit(f"FAIL: {kind} report is empty: {p}")
+              print(f"{kind}: {p} ({size} bytes)")
+
+          # CSV must contain the header row the app promises
+          with open(paths["csv"], encoding="utf-8-sig") as fh:
+              header = fh.readline()
+          assert "check_name" in header and "recommendation" in header, "CSV header wrong"
+          # JSON must parse and carry hostname/version
+          import json
+          with open(paths["json"], encoding="utf-8") as fh:
+              payload = json.load(fh)
+          assert payload.get("hostname") and payload.get("version"), "JSON metadata missing"
           print("SMOKE OK:", rep["summary"])
           PY
+      - name: Upload smoke reports as evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-reports
+          path: reports/smoke/
+          if-no-files-found: warn
       - name: Launch Streamlit and verify HTTP 200
         run: |
+          set -euo pipefail
           nohup python -m streamlit run app.py --server.headless true \
               --server.port 8501 > streamlit.log 2>&1 &
+          # Wait for the server to come up (it may answer non-200 briefly while booting)
+          up=""
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8501/healthz > /dev/null; then echo "Streamlit up"; break; fi
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8501/ || true)
+            if [ "$code" = "200" ]; then up="yes"; echo "Streamlit up after ~$((i*2))s"; break; fi
             sleep 2
           done
-          curl -sf http://localhost:8501/ -o page.html
+          echo "--- streamlit.log ---"; tail -n 30 streamlit.log
+          if [ -z "$up" ]; then
+            echo "::error::Streamlit did not return HTTP 200 within 60s"
+            exit 1
+          fi
+          # Explicit hard assertion on the status code of the main page
+          code=$(curl -s -o page.html -w '%{http_code}' http://localhost:8501/)
+          echo "GET / -> HTTP $code"
+          test "$code" = "200"
           grep -qi "streamlit" page.html
-          echo "--- streamlit.log ---"; tail -n 20 streamlit.log

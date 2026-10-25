@@ -79,20 +79,20 @@ def _valid_host(value: Any) -> bool:
         and len(host) <= 253
 
 
-def _printer_port(raw: Any, name: str, problems: list[str]) -> None:
+def _printer_port(raw: Any, label: str, problems: list[str]) -> None:
     """Validate one printer raw-port entry, appending explicit problems."""
     if raw is None:  # absent -> caller default (9100) applies
         return
     if isinstance(raw, bool):
-        problems.append(f"Network printer '{name}' has boolean port {raw!r}; expected 1-65535")
+        problems.append(f"{label} has boolean port {raw!r}; expected 1-65535")
         return
     try:
         port = int(raw)
     except (TypeError, ValueError):
-        problems.append(f"Network printer '{name}' has non-numeric port '{raw}'")
+        problems.append(f"{label} has non-numeric port '{raw}'")
         return
     if not 1 <= port <= 65535:
-        problems.append(f"Network printer '{name}' has invalid port {raw} (must be 1-65535)")
+        problems.append(f"{label} has invalid port {raw} (must be 1-65535)")
 
 
 def _num_in_range(value: Any, lo: float, hi: float) -> float | None:
@@ -126,10 +126,11 @@ def validate_config(cfg: dict) -> list[str]:
         problems.append("'thresholds' section must be an object")
         th = {}
 
-    def _check_threshold(key: str, lo: float, hi: float) -> float | None:
+    def _check_threshold(key: str, lo: float, hi: float, required: bool = True) -> float | None:
         """Validate one threshold against explicit lower/upper bounds."""
         if key not in th or th[key] is None:
-            problems.append(f"{key} is missing; using default")
+            if required:
+                problems.append(f"{key} is missing; using default")
             return None
         raw = th[key]
         if isinstance(raw, bool):
@@ -162,8 +163,12 @@ def validate_config(cfg: dict) -> list[str]:
         if w is not None and f is not None and w > f:
             problems.append(f"{wkey} ({w:g}) is greater than {fkey} ({f:g})")
 
-    parsed["disk_min_free_gb_warning"] = _check_threshold("disk_min_free_gb_warning", 0.0, 1_000_000.0)
-    parsed["uptime_minimum_hours"] = _check_threshold("uptime_minimum_hours", 0.0, 87_600.0)
+    # Optional thresholds: absent is fine (defaults apply); only explicitly
+    # configured values are validated against their bounds.
+    parsed["disk_min_free_gb_warning"] = _check_threshold(
+        "disk_min_free_gb_warning", 0.0, 1_000_000.0, required=False)
+    parsed["uptime_minimum_hours"] = _check_threshold(
+        "uptime_minimum_hours", 0.0, 87_600.0, required=False)
 
     # ------------------------------------------------------------------ #
     # Timeouts: every key must be a positive number <= 120 seconds.
@@ -213,17 +218,21 @@ def validate_config(cfg: dict) -> list[str]:
             continue
         enabled = bool(svc.get("enabled"))
         name = svc.get("name", f"entry #{i + 1}")
-        if not svc.get("host"):
+        has_host = bool(svc.get("host")) and str(svc["host"]).strip() != ""
+        if not has_host:
             if enabled:
                 problems.append(f"Business service '{name}' is enabled but has no host")
         elif not _valid_host(svc["host"]):
             problems.append(f"Business service '{name}' has invalid host '{svc['host']}'")
-        try:
-            port = int(svc.get("port", 0))
-            if not 1 <= port <= 65535:
-                problems.append(f"Business service '{name}' has invalid port {svc.get('port')} (must be 1-65535)")
-        except (TypeError, ValueError):
-            problems.append(f"Business service '{name}' has non-numeric port '{svc.get('port')}'")
+        # Validate the port whenever it is present, enabled or not - a typo in
+        # a disabled entry must be surfaced explicitly (issue #2), matching
+        # how network-printer ports are treated.
+        raw_port = svc.get("port")
+        if raw_port is None or (isinstance(raw_port, str) and raw_port.strip() == ""):
+            if enabled:
+                problems.append(f"Business service '{name}' has no port (must be 1-65535)")
+        else:
+            _printer_port(raw_port, f"business service {name}", problems)
 
     # ------------------------------------------------------------------ #
     # Printers section: validate EVERY configured printer address and port,
@@ -252,7 +261,7 @@ def validate_config(cfg: dict) -> list[str]:
         elif not _valid_host(host):
             problems.append(f"Network printer '{name}' has invalid host '{p.get('host')}'")
         # Validate the port whenever it is present, enabled or not.
-        _printer_port(p.get("raw_port"), str(name), problems)
+        _printer_port(p.get("raw_port"), f"Network printer '{name}'", problems)
 
     try:
         mj = int(prn.get("max_jobs_listed_per_queue", 20))
