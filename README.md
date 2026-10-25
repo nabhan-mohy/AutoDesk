@@ -118,7 +118,7 @@ Open the URL printed in the terminal — normally **http://localhost:8501**.
 python -m pytest -q
 ```
 
-Expected output: `54 passed` (the authoritative current count — rerun the suite to confirm after any change).
+Expected output: `58 passed` (the authoritative current count — rerun the suite to confirm after any change).
 
 ---
 
@@ -260,14 +260,14 @@ Tests mock psutil, sockets, ping/subprocess, WMI, and filesystem-dependent calls
 **Actual result in the development environment (Python 3.12, Linux container):**
 
 ```
-......................................................                   [100%]
-54 passed in 0.23s
+..........................................................               [100%]
+58 passed in 0.35s
 ```
 
 | Suite | Tests | Focus |
 |---|---|---|
 | `test_health_engine.py` | 8 | summarize/verdict, thresholds, crash isolation, progress |
-| `test_network_checks.py` | 14 | gateway PASS/WARNING/FAIL evidence rules + internet endpoint false-outage rules (mocked) |
+| `test_network_checks.py` | 18 | gateway PASS/WARNING/FAIL evidence rules, internet endpoint false-outage rules, ping loss-parsing, invalid service port handling, crash isolation in the runner loop (mocked) |
 | `test_printer_checks.py` | 11 | offline status => WARNING never FAIL, probe-only failure inconclusive, FAIL requires corroborated local outage, non-Windows graceful degradation |
 | `test_config_loader.py` | 16 | defaults merging, threshold bounds (warn<=fail, explicit min/max per threshold), every printer host/port validated even when disabled, malformed entries, timeout bounds, corrupt-file handling |
 | `test_reporting.py` | 5 | CSV rows, JSON schema, HTML content, filename safety, no credentials in output |
@@ -304,7 +304,7 @@ workstation, run from PowerShell in the project directory:
 
 ```powershell
 python -m pip install -r requirements.txt
-python -m pytest -q          # expect: 54 passed
+python -m pytest -q          # expect: 58 passed
 python -m streamlit run app.py
 ```
 

@@ -168,13 +168,17 @@ def ping_host(host: str, timeout_s: float) -> tuple[bool, float | None, str]:
         output = (res.stdout or "") + (res.stderr or "")
         times = [float(t) for t in re.findall(r"time[=<]\s*(\d+(?:\.\d+)?)\s*ms", output, re.I)]
         lost = None
-        m = re.search(r"(\d+)%", output)
-        if "unreachable" in output.lower() or "could not find" in output.lower() or "100% loss" in output.lower().replace(" ", ""):
+        # Match ONLY the loss percentage ("N% packet loss" / "loss: N%"), never
+        # any bare 'N%' - an earlier greedy r"(\d+)% could grab TTL/other fields.
+        m = re.search(r"(\d{1,3})\s*%\s*(?:packet\s+)?loss|(?:loss|lost)\D{0,20}?(\d{1,3})\s*%",
+                      output, re.I)
+        if m:
+            lost = int(next(g for g in m.groups() if g is not None))
+        low = output.lower().replace(" ", "")
+        if ("unreachable" in low or "couldnotfind" in low or "100%loss" in low):
             ok = False
         else:
             ok = res.returncode == 0 and bool(times)
-        if m and "loss" in output.lower():
-            lost = int(m.group(1))
         avg = round(sum(times) / len(times), 1) if times else None
         return ok, avg, f"loss={lost}% avg={avg}ms" if lost is not None else output.strip()[:120]
     except FileNotFoundError:
@@ -316,6 +320,11 @@ def check_dns(cfg: dict) -> list[CheckResult]:
         results.append(error_result("DNS servers configured", CATEGORY, exc))
 
     timeout = cfg["timeouts"]["dns_resolve_seconds"]
+    # NOTE: socket.setdefaulttimeout() does NOT reliably bound getaddrinfo's
+    # internal resolver on all platforms (Windows can block in the system
+    # resolver regardless). We still set it as a best-effort guard, but also
+    # classify slow/failed lookups conservatively so a hang is reported as an
+    # inconclusive WARNING rather than silently stalling or over-claiming.
     old = socket.getdefaulttimeout()
     socket.setdefaulttimeout(timeout)
     try:
@@ -323,33 +332,58 @@ def check_dns(cfg: dict) -> list[CheckResult]:
             host = str(host).strip()
             if not host:
                 continue
+            t0 = time.perf_counter()
             try:
                 infos = socket.getaddrinfo(host, None, socket.AF_INET)
                 ips = sorted({i[4][0] for i in infos})
+                elapsed = round(time.perf_counter() - t0, 2)
+                rec = ""
+                st = PASS
+                if elapsed > timeout:
+                    # Succeeded but slower than configured: suspicious but not
+                    # proof of failure -> WARNING with explanation.
+                    st = WARNING
+                    rec = (f"Resolution of '{host}' took {elapsed}s, longer than the configured "
+                           f"{timeout}s budget (the OS resolver may ignore the timeout). Check DNS "
+                           "server responsiveness; intermittent slowness often precedes outages.")
                 results.append(make_result(
-                    name=f"DNS resolution: {host}", category=CATEGORY, status=PASS,
-                    observed=f"Resolved to {', '.join(ips)}",
+                    name=f"DNS resolution: {host}", category=CATEGORY, status=st,
+                    observed=f"Resolved to {', '.join(ips)} in {elapsed}s",
                     expected=f"'{host}' resolves within {timeout}s",
-                    details={"ips": ips},
+                    recommendation=rec,
+                    details={"ips": ips, "seconds": elapsed},
                 ))
             except socket.gaierror as exc:
+                elapsed = round(time.perf_counter() - t0, 2)
+                # A fast NODATA/NXDOMAIN answer is a definite negative; a slow
+                # failure usually means the resolver itself timed out, which is
+                # indistinguishable from egress filtering - report WARNING then.
+                definitive = elapsed < timeout
                 results.append(make_result(
-                    name=f"DNS resolution: {host}", category=CATEGORY, status=FAIL,
-                    observed=f"Resolution failed: {exc}",
+                    name=f"DNS resolution: {host}", category=CATEGORY,
+                    status=FAIL if definitive else WARNING,
+                    observed=f"Resolution failed after {elapsed}s: {exc}",
                     expected=f"'{host}' resolves within {timeout}s",
-                    recommendation=("DNS failure. Try 'ipconfig /flushdns', verify the DNS server "
-                                    "in ipconfig, and test another hostname. If only internal "
-                                    "names fail, the problem is the dealership DNS/domain controller."),
-                    details={"error": str(exc)},
+                    recommendation=(("DNS failure. Try 'ipconfig /flushdns', verify the DNS server "
+                                      "in ipconfig, and test another hostname. If only internal "
+                                      "names fail, the problem is the dealership DNS/domain controller.")
+                                     if definitive else
+                                     ("Lookup did not complete quickly enough; this is inconclusive - "
+                                      "the DNS server may be slow/unreachable or the query filtered. "
+                                      "Retry and compare against the gateway/interface rows.")),
+                    details={"error": str(exc), "seconds": elapsed},
                 ))
             except OSError as exc:
                 results.append(make_result(
-                    name=f"DNS resolution: {host}", category=CATEGORY, status=FAIL,
+                    name=f"DNS resolution: {host}", category=CATEGORY, status=WARNING,
                     observed=f"Network error during resolution: {exc}",
                     expected=f"'{host}' resolves within {timeout}s",
-                    recommendation="Check local connectivity before blaming DNS.",
+                    recommendation="Transient network error during lookup; re-run before concluding. "
+                                   "Check local connectivity before blaming DNS.",
                     details={"error": str(exc)},
                 ))
+            except Exception as exc:  # never let one hostname kill the batch
+                results.append(error_result(f"DNS resolution: {host}", CATEGORY, exc))
     finally:
         socket.setdefaulttimeout(old)
     return results
@@ -536,7 +570,23 @@ def check_business_services(cfg: dict) -> list[CheckResult]:
         ))
     for svc in services:
         host = str(svc["host"]).strip()
-        port = int(svc.get("port", 0))
+        # Defensive parse (mirrors printer raw_port handling): a malformed
+        # port becomes an explicit WARNING row instead of crashing the batch.
+        raw_port = svc.get("port", 0)
+        try:
+            port = int(raw_port)
+            if not 1 <= port <= 65535:
+                raise ValueError(raw_port)
+        except (TypeError, ValueError):
+            results.append(make_result(
+                name=f"Service TCP: {svc.get('name') or host} (invalid port)",
+                category=CATEGORY, status=WARNING,
+                observed=f"Configured port {raw_port!r} is not a valid TCP port (1-65535); skipped",
+                expected="An integer port between 1 and 65535",
+                recommendation="Fix the 'port' value for this service in config.json.",
+                details={"host": host, "port": raw_port},
+            ))
+            continue
         name = str(svc.get("name") or f"{host}:{port}")
         ok, info, _lat = tcp_probe(host, port, timeout)
         rec = "" if ok else (
@@ -583,11 +633,18 @@ def run_network_checks(cfg: dict) -> list[CheckResult]:
     # claim a confirmed outage.
     runners = [check_interfaces, check_business_services, check_ping_hosts,
                check_gateway, check_dns, check_internet]
+    # Functions that need corroborating evidence from earlier results of this
+    # same run. Keep this set in sync with the signatures above - a missing
+    # entry here previously raised TypeError inside the loop.
+    evidence_consumers = {check_gateway, check_internet}
     results: list[CheckResult] = []
     for fn in runners:
-        if fn in (check_gateway, check_internet):
-            rs = fn(cfg, prior_results=results)
-        else:
-            rs = fn(cfg)
+        try:
+            if fn in evidence_consumers:
+                rs = fn(cfg, prior_results=results)
+            else:
+                rs = fn(cfg)
+        except Exception as exc:  # one broken check must never kill the run
+            rs = [error_result(getattr(fn, "__name__", "network check"), CATEGORY, exc)]
         results.extend(rs)
     return results

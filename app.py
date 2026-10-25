@@ -58,8 +58,12 @@ def _noop():
 def render_summary(report: dict):
     counts = report["summary"]["counts"]
     overall = report["summary"]["overall"]
-    color = {"READY": "#1a7f37", "READY WITH ISSUES": "#b58900", "NOT READY": "#c62828"}[overall]
-    icon = {"READY": "🟢", "READY WITH ISSUES": "🟡", "NOT READY": "🔴"}[overall]
+    # .get with fallbacks: an unexpected/legacy overall value must never crash
+    # the dashboard with a KeyError.
+    _COLORS = {"READY": "#1a7f37", "READY WITH ISSUES": "#b58900", "NOT READY": "#c62828"}
+    _ICONS = {"READY": "🟢", "READY WITH ISSUES": "🟡", "NOT READY": "🔴"}
+    color = _COLORS.get(overall, "#455a64")
+    icon = _ICONS.get(overall, "ℹ️")
     st.markdown(
         f"<div style='background:{color};color:white;padding:14px 18px;border-radius:8px;"
         f"font-size:20px;font-weight:700;margin-bottom:12px'>{icon} Workstation readiness: {overall}"
@@ -232,8 +236,12 @@ def render_resource_cards(report: dict):
     if disks:
         cols = st.columns(min(len(disks), 4))
         for col, d in zip(cols, disks):
-            pct = d.details.get("percent", 0)
-            col.metric(d.name.replace("Disk space ", "Drive "), f"{pct}%",
+            total_gb = d.details.get("total_gb") or 0
+            pct = d.details.get("percent")
+            if pct is None and total_gb:  # derive defensively; never divide by zero
+                pct = round(100 * (1 - (d.details.get("free_gb", 0) / total_gb)), 1)
+            col.metric(d.name.replace("Disk space ", "Drive "),
+                       f"{pct if pct is not None else '—'}%",
                        f"{d.details.get('free_gb', '—')} GB free", delta_color="off")
 
 

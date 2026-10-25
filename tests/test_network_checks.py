@@ -8,6 +8,7 @@ Rules under test:
              (authoritative route + all probes + corroborating failed TCP checks)
 """
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -172,3 +173,74 @@ def test_internet_all_success_is_pass_no_summary_issue():
     with patch.object(nc, "_http_probe", return_value=(True, "HTTP 200")):
         res = nc.check_internet(CFG_NET)
     assert all(r.status == PASS for r in res)
+
+
+# --------------------------------------------------------------------------- #
+# Regression tests for hardening fixes (issue: "fix all problems on the code")
+# --------------------------------------------------------------------------- #
+def test_ping_loss_regex_ignores_non_loss_percentages():
+    """A stray '64%' (e.g. TTL) must not be read as packet loss."""
+    fake = type("R", (), {"returncode": 0, "stdout":
+                          "64 bytes from 10.0.0.1: ttl=64% time=1ms\n"
+                          "2 packets transmitted, 2 received, 0% packet loss",
+                          "stderr": ""})()
+    with patch.object(nc.subprocess, "run", return_value=fake):
+        ok, avg, info = nc.ping_host("10.0.0.1", 1)
+    assert ok is True
+    assert "loss=0%" in info
+
+
+CFG_SVC = {
+    "timeouts": {"tcp_connect_seconds": 1, "ping_seconds": 1},
+    "network": {"business_services": [
+        {"name": "Broken DMS", "host": "dms.local", "port": "abc", "enabled": True},
+        {"name": "Good DMS", "host": "dms2.local", "port": 1433, "enabled": True},
+    ]},
+}
+
+
+def test_business_service_invalid_port_becomes_warning_not_crash():
+    """A malformed port used to raise ValueError and kill the whole network run."""
+    with patch.object(nc, "tcp_probe", return_value=(True, "TCP ok", 1.0)):
+        res = nc.check_business_services(CFG_SVC)
+    bad = [r for r in res if "invalid port" in r.name]
+    good = [r for r in res if r.name.startswith("Service TCP: Good DMS")]
+    assert bad and bad[0].status == WARNING
+    assert good and good[0].status == PASS
+
+
+def test_run_network_checks_survives_raising_check():
+    """If any single check function raises, the run continues with an error row."""
+    def boom(cfg, prior_results=None):
+        raise RuntimeError("gateway exploded")
+    with patch.object(nc, "check_interfaces", return_value=[]), \
+         patch.object(nc, "check_business_services", return_value=[]), \
+         patch.object(nc, "check_ping_hosts", return_value=[]), \
+         patch.object(nc, "check_gateway", side_effect=boom), \
+         patch.object(nc, "check_dns", return_value=[]), \
+         patch.object(nc, "check_internet", return_value=[]):
+        res = nc.run_network_checks(CFG)
+    assert any(r.status == FAIL and "gateway exploded" in r.observed for r in res)
+
+
+def test_dns_fast_gaierror_is_fail_slow_is_warning():
+    cfg = {"timeouts": {"dns_resolve_seconds": 4.0},
+           "network": {"dns_test_hostnames": ["x.test"]}}
+    import socket as _s
+
+    def fast_raise(host, *a, **k):
+        raise _s.gaierror(-2, "Name or service not known")
+    with patch.object(nc.socket, "getaddrinfo", side_effect=fast_raise):
+        res = nc.check_dns(cfg)
+    dns_rows = [r for r in res if r.name.startswith("DNS resolution")]
+    assert dns_rows and dns_rows[0].status == nc.FAIL  # instant NXDOMAIN = definite negative
+
+    def slow_raise(host, *a, **k):
+        time.sleep(0.05)
+        raise _s.gaierror(-3, "Temporary failure in name resolution")
+    cfg2 = {"timeouts": {"dns_resolve_seconds": 0.001},
+           "network": {"dns_test_hostnames": ["x.test"]}}
+    with patch.object(nc.socket, "getaddrinfo", side_effect=slow_raise):
+        res2 = nc.check_dns(cfg2)
+    dns_rows2 = [r for r in res2 if r.name.startswith("DNS resolution")]
+    assert dns_rows2 and dns_rows2[0].status == nc.WARNING  # timeout-ish -> inconclusive
