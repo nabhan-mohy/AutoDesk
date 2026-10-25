@@ -25,11 +25,258 @@ APP_VERSION = "1.0.0"
 st.set_page_config(page_title=APP_TITLE, page_icon="🖥️", layout="wide")
 
 STATUS_STYLE = {
-    PASS: ("#1a7f37", "✅"),
-    WARNING: ("#b58900", "⚠️"),
-    FAIL: ("#c62828", "❌"),
-    INFO: ("#455a64", "ℹ️"),
+    PASS: ("#1fe7a8", "✅"),
+    WARNING: ("#ffc857", "⚠️"),
+    FAIL: ("#ff5f7a", "❌"),
+    INFO: ("#7dd3fc", "ℹ️"),
 }
+
+CUSTOM_CSS = """
+<style>
+    :root {
+        --bg-1: #07111f;
+        --bg-2: #0d1b2a;
+        --panel: rgba(17, 26, 38, 0.72);
+        --panel-strong: rgba(19, 31, 46, 0.9);
+        --glass: rgba(255,255,255,0.06);
+        --border: rgba(148, 163, 184, 0.18);
+        --text: #eaf6ff;
+        --muted: #a6bfd5;
+        --cyan: #67e8f9;
+        --blue: #60a5fa;
+        --violet: #8b5cf6;
+        --teal: #2dd4bf;
+        --green: #34d399;
+        --amber: #fbbf24;
+        --red: #fb7185;
+        --shadow: 0 22px 60px rgba(8, 15, 30, 0.65);
+    }
+
+    .stApp {
+        background:
+            radial-gradient(circle at top left, rgba(103, 232, 249, 0.18), transparent 25%),
+            radial-gradient(circle at top right, rgba(139, 92, 246, 0.16), transparent 30%),
+            linear-gradient(135deg, var(--bg-1), var(--bg-2) 30%, #091521 100%);
+        color: var(--text);
+    }
+
+    .stApp::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background: radial-gradient(circle at 20% 20%, rgba(103,232,249,0.12), transparent 20%),
+                    radial-gradient(circle at 80% 0%, rgba(139,92,246,0.15), transparent 28%);
+        pointer-events: none;
+        animation: pulseGlow 12s ease-in-out infinite alternate;
+    }
+
+    @keyframes pulseGlow {
+        0% { opacity: 0.7; transform: scale(1); }
+        100% { opacity: 1; transform: scale(1.08); }
+    }
+
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+        background: transparent;
+    }
+
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 4rem;
+    }
+
+    .glass-panel {
+        background: linear-gradient(180deg, rgba(18,29,42,0.9), rgba(12,19,31,0.8));
+        border: 1px solid var(--border);
+        border-radius: 22px;
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+    }
+
+    .hero-box {
+        position: relative;
+        overflow: hidden;
+        padding: 1.5rem 1.5rem 1.2rem 1.5rem;
+        margin-bottom: 1.2rem;
+        background: linear-gradient(135deg, rgba(14,24,36,0.95), rgba(15,23,42,0.82));
+        border: 1px solid rgba(103,232,249,0.25);
+        border-radius: 22px;
+        box-shadow: 0 30px 60px rgba(12, 19, 31, 0.6);
+    }
+
+    .hero-box::after {
+        content: "";
+        position: absolute;
+        inset: -25% auto auto -10%;
+        width: 220px;
+        height: 220px;
+        background: radial-gradient(circle, rgba(103,232,249,0.28), transparent 60%);
+        animation: drift 16s ease-in-out infinite alternate;
+    }
+
+    @keyframes drift {
+        0% { transform: translate(0, 0) scale(1); }
+        100% { transform: translate(30px, 18px) scale(1.15); }
+    }
+
+    .hero-title {
+        font-size: 2.2rem !important;
+        font-weight: 800 !important;
+        letter-spacing: 0.02em;
+        margin-bottom: 0.15rem;
+        color: #f8fbff;
+        position: relative;
+        z-index: 1;
+    }
+
+    .hero-sub {
+        color: var(--muted);
+        font-size: 0.96rem;
+        position: relative;
+        z-index: 1;
+    }
+
+    .status-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        padding: 0.7rem 1rem;
+        border-radius: 999px;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+        border: 1px solid rgba(255,255,255,0.1);
+        box-shadow: inset 0 0 24px rgba(255,255,255,0.04);
+    }
+
+    .summary-chip {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0.45rem 0.8rem;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.04);
+        border: 1px solid rgba(148,163,184,0.15);
+        color: var(--text);
+        font-size: 0.8rem;
+        min-width: 90px;
+    }
+
+    .metric-container {
+        padding: 0.8rem 0.9rem;
+        border-radius: 18px;
+        background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+        border: 1px solid rgba(148,163,184,0.12);
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+        transition: transform 0.2s ease, border-color 0.2s ease;
+    }
+
+    .metric-container:hover {
+        transform: translateY(-2px);
+        border-color: rgba(103,232,249,0.35);
+    }
+
+    .stMetric {
+        background: transparent !important;
+    }
+
+    [data-testid="stMetricValue"] {
+        color: #f8fbff !important;
+        font-weight: 700 !important;
+        font-size: 1.3rem !important;
+    }
+
+    [data-testid="stMetricLabel"] {
+        color: var(--muted) !important;
+        font-weight: 600 !important;
+    }
+
+    [data-testid="stMetricDelta"] {
+        color: var(--muted) !important;
+    }
+
+    .stButton > button {
+        border-radius: 12px !important;
+        border: 1px solid rgba(103,232,249,0.25) !important;
+        background: linear-gradient(135deg, rgba(16, 34, 52, 0.96), rgba(19, 31, 48, 0.9)) !important;
+        color: #edf7ff !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.02em;
+        padding: 0.7rem 1rem !important;
+        box-shadow: 0 10px 22px rgba(12, 20, 32, 0.5);
+        transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+    }
+
+    .stButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 14px 28px rgba(33, 112, 161, 0.28);
+        border-color: rgba(103,232,249,0.5) !important;
+    }
+
+    .stButton > button:focus {
+        box-shadow: 0 0 0 0.2rem rgba(103,232,249,0.25) !important;
+    }
+
+    .sidebar .sidebar-content {
+        background: linear-gradient(180deg, rgba(9,18,31,0.96), rgba(10,17,26,0.96));
+        border-right: 1px solid rgba(148,163,184,0.14);
+    }
+
+    .stDataFrame {
+        background: rgba(9,15,21,0.5);
+        border-radius: 18px;
+        border: 1px solid rgba(148,163,184,0.10);
+    }
+
+    .stTabs [role="tablist"] {
+        gap: 0.5rem;
+    }
+
+    .stTabs [role="tab"] {
+        border-radius: 12px 12px 0 0;
+        padding: 0.7rem 0.95rem;
+        font-weight: 650;
+        color: var(--muted);
+        border: 1px solid transparent;
+        background: rgba(255,255,255,0.02);
+    }
+
+    .stTabs [role="tab"][aria-selected="true"] {
+        color: var(--text);
+        background: linear-gradient(180deg, rgba(103,232,249,0.12), rgba(139,92,246,0.08));
+        border-color: rgba(103,232,249,0.25);
+    }
+
+    .info-note {
+        border-left: 3px solid rgba(103,232,249,0.8);
+        background: rgba(103,232,249,0.06);
+        color: #dffaff;
+        border-radius: 0 14px 14px 0;
+        padding: 0.8rem 1rem;
+        margin: 0.75rem 0 1rem 0;
+    }
+
+    .problem-card {
+        background: linear-gradient(135deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+        border: 1px solid rgba(148,163,184,0.16);
+        border-radius: 18px;
+        padding: 1rem;
+        margin-bottom: 0.8rem;
+    }
+
+    .success-box {
+        color: #d7fff0;
+        background: rgba(52, 211, 153, 0.08);
+        border: 1px solid rgba(52,211,153,0.25);
+        border-radius: 14px;
+        padding: 0.8rem 1rem;
+    }
+
+    @media (max-width: 768px) {
+        .hero-title { font-size: 1.75rem !important; }
+        .block-container { padding-top: 1rem; }
+    }
+</style>
+"""
 
 
 def init_state():
@@ -58,29 +305,46 @@ def _noop():
 def render_summary(report: dict):
     counts = report["summary"]["counts"]
     overall = report["summary"]["overall"]
-    # .get with fallbacks: an unexpected/legacy overall value must never crash
-    # the dashboard with a KeyError.
-    _COLORS = {"READY": "#1a7f37", "READY WITH ISSUES": "#b58900", "NOT READY": "#c62828"}
+    _COLORS = {"READY": "#24c18d", "READY WITH ISSUES": "#fbbf24", "NOT READY": "#ff5f7a"}
     _ICONS = {"READY": "🟢", "READY WITH ISSUES": "🟡", "NOT READY": "🔴"}
-    color = _COLORS.get(overall, "#455a64")
+    color = _COLORS.get(overall, "#7dd3fc")
     icon = _ICONS.get(overall, "ℹ️")
+
     st.markdown(
-        f"<div style='background:{color};color:white;padding:14px 18px;border-radius:8px;"
-        f"font-size:20px;font-weight:700;margin-bottom:12px'>{icon} Workstation readiness: {overall}"
-        f"<span style='float:right;font-weight:400;font-size:14px'>Checks: {report['summary']['total']}"
-        f" &nbsp;|&nbsp; Duration: {report['duration_seconds']} s</span></div>",
+        f"""
+        <div class="hero-box glass-panel">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;">
+                <div>
+                    <div class="status-badge" style="background: rgba(255,255,255,0.02); border-color: rgba(255,255,255,0.08); color: {color};">
+                        {icon} Workstation readiness: {overall}
+                    </div>
+                    <div style="margin-top: 0.8rem; color: var(--muted); font-size: 0.9rem;">
+                        Checks: <strong style="color:#f8fbff;">{report['summary']['total']}</strong>
+                        &nbsp;&nbsp;•&nbsp;&nbsp; Duration: <strong style="color:#f8fbff;">{report['duration_seconds']} s</strong>
+                    </div>
+                </div>
+                <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                    <span class="summary-chip">PASS {counts.get(PASS, 0)}</span>
+                    <span class="summary-chip">WARN {counts.get(WARNING, 0)}</span>
+                    <span class="summary-chip">FAIL {counts.get(FAIL, 0)}</span>
+                    <span class="summary-chip">INFO {counts.get(INFO, 0)}</span>
+                </div>
+            </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
+
     c1, c2, c3, c4 = st.columns(4)
     cards = [(PASS, counts.get(PASS, 0)), (WARNING, counts.get(WARNING, 0)),
              (FAIL, counts.get(FAIL, 0)), (INFO, counts.get(INFO, 0))]
     for col, (status, n) in zip([c1, c2, c3, c4], cards):
         hexcol, emoji = STATUS_STYLE[status]
-        col.metric(f"{emoji} {status}", n, delta_color="off")
+        with col:
+            st.markdown(f"<div class='metric-container'><div style='color:{hexcol}; font-weight:700; margin-bottom:0.35rem;'>{emoji} {status}</div><div style='font-size:1.9rem; font-weight:800; color:#f8fbff;'>{n}</div></div>", unsafe_allow_html=True)
 
 
 def render_results(df: pd.DataFrame, key_prefix: str = "all"):
-    # key_prefix keeps widget IDs unique when this is rendered inside several tabs.
     search = st.text_input("Search results", placeholder="Filter by check name, value or recommendation…",
                            key=f"search_{key_prefix}")
     fcat = st.multiselect("Category", sorted(df["Category"].unique()), default=sorted(df["Category"].unique()),
@@ -100,7 +364,7 @@ def render_results(df: pd.DataFrame, key_prefix: str = "all"):
 def render_actions(report: dict):
     problems = [r for r in report["results"] if r.status in (FAIL, WARNING)]
     if not problems:
-        st.success("No issues detected. No further action required.")
+        st.markdown("<div class='success-box'>No issues detected. No further action required.</div>", unsafe_allow_html=True)
         return
     st.subheader("Recommended next actions")
     for r in sorted(problems, key=lambda x: (x.status != FAIL, x.category)):
@@ -130,10 +394,17 @@ def main():
     init_state()
     cfg = load_config()
 
-    st.title(f"🖥️ {APP_TITLE}")
-    st.caption(f"v{APP_VERSION} · Automated PC / network / printer readiness checks for dealership "
-               "showroom, billing and service-advisor workstations. Read-only: this tool never "
-               "restarts services, clears queues or prints test pages.")
+    st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+    st.markdown(
+        """
+        <div class="hero-box glass-panel">
+            <div class="hero-title">🖥️ AutoDesk IT Health Monitor</div>
+            <div class="hero-sub">v1.0.0 · Automated PC / network / printer readiness checks for dealership showroom, billing and service-advisor workstations.</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if cfg.get("_load_error"):
         st.warning(cfg["_load_error"])
@@ -184,8 +455,7 @@ def main():
 
     report = st.session_state.report
     if report is None:
-        st.info("Click **Run Full Health Check** in the sidebar to start diagnostics. "
-                "First run typically takes 10–30 seconds depending on network timeouts.")
+        st.markdown("<div class='info-note'>Click <strong>Run Full Health Check</strong> in the sidebar to start diagnostics. First run typically takes 10–30 seconds depending on network timeouts.</div>", unsafe_allow_html=True)
         return
 
     st.subheader("Summary")
@@ -202,8 +472,7 @@ def main():
     with tab_net:
         render_results(df[df["Category"] == "Network"], key_prefix="net")
     with tab_prn:
-        st.caption("Note: OS-reported status and network reachability do NOT prove a device can "
-                   "physically print (toner/paper/jams are not visible from software).")
+        st.markdown("<div class='info-note'>Note: OS-reported status and network reachability do NOT prove a device can physically print (toner/paper/jams are not visible from software).</div>", unsafe_allow_html=True)
         render_results(df[df["Category"] == "Printer"], key_prefix="prn")
     with tab_all:
         render_results(df, key_prefix="all")
@@ -238,7 +507,7 @@ def render_resource_cards(report: dict):
         for col, d in zip(cols, disks):
             total_gb = d.details.get("total_gb") or 0
             pct = d.details.get("percent")
-            if pct is None and total_gb:  # derive defensively; never divide by zero
+            if pct is None and total_gb:
                 pct = round(100 * (1 - (d.details.get("free_gb", 0) / total_gb)), 1)
             col.metric(d.name.replace("Disk space ", "Drive "),
                        f"{pct if pct is not None else '—'}%",
